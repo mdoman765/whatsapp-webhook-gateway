@@ -17,8 +17,6 @@ namespace crud_app_backend.DTOs
         public string TempData { get; set; } = "{}";
 
         public string PreviousStep { get; set; } = "INIT";
-        public bool PendingReport { get; set; } = false;
-        public bool PendingShopReg { get; set; } = false;
 
         /// <summary>Optional: raw message text, stored in audit log.</summary>
         public string? RawMessage { get; set; }

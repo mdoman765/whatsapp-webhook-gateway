@@ -1,6 +1,5 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using crud_app_backend.Bot.Models;
 using crud_app_backend.DTOs;
 using crud_app_backend.Models;
@@ -10,11 +9,7 @@ using Microsoft.Extensions.Caching.Memory;
 
 namespace crud_app_backend.Bot.Services
 {
-    /// <summary>
-    /// UAE WhatsApp bot — Pran-RFL Customer Support (retailer-facing).
-    /// Handles: Order, Return, Complaint, Agent, Salesman, Order Tracking.
-    /// Languages: English / Bangla / Hindi.
-    /// </summary>
+
     public class UaeBotService : IUaeBotService
     {
         private readonly IWhatsAppSessionService _sessionSvc;
@@ -22,10 +17,10 @@ namespace crud_app_backend.Bot.Services
         private readonly IWebHostEnvironment _env;
         private readonly IConfiguration _config;
         private readonly IDialogClient _dialog;
-        private readonly ISprorClient _spror;
         private readonly IUaeCrmService _crm;
         private readonly IMemoryCache _cache;
         private readonly BotStateService _state;
+        private readonly IHttpClientFactory _httpFactory;
         private readonly ILogger<UaeBotService> _logger;
 
         public UaeBotService(
@@ -34,10 +29,10 @@ namespace crud_app_backend.Bot.Services
             IWebHostEnvironment env,
             IConfiguration config,
             IDialogClient dialog,
-            ISprorClient spror,
             IUaeCrmService crm,
             IMemoryCache cache,
             BotStateService state,
+            IHttpClientFactory httpFactory,
             ILogger<UaeBotService> logger)
         {
             _sessionSvc = sessionSvc;
@@ -45,16 +40,14 @@ namespace crud_app_backend.Bot.Services
             _env = env;
             _config = config;
             _dialog = dialog;
-            _spror = spror;
             _crm = crm;
             _cache = cache;
             _state = state;
+            _httpFactory = httpFactory;
             _logger = logger;
         }
 
-        // ─────────────────────────────────────────────────────────────────────
-        // ENTRY POINT
-        // ─────────────────────────────────────────────────────────────────────
+
 
         public async Task ProcessAsync(JsonElement body)
         {
@@ -66,21 +59,18 @@ namespace crud_app_backend.Bot.Services
                 _logger.LogInformation("[UAE] {Type} from {Phone} id={Id}",
                     msg.MsgType, msg.From, msg.MessageId);
 
-                // Per-user lock — prevents gallery burst race conditions
                 var userLock = _state.UserLocks.GetOrAdd(msg.From, _ => new SemaphoreSlim(1, 1));
                 await userLock.WaitAsync();
                 try
                 {
                     var session = await LoadSessionAsync(msg.From);
 
-                    // Instant ACK for slow paths
                     var ack = GetAckMessage(session, msg);
                     if (ack != null)
                         await _dialog.SendTextAsync(msg.From, ack);
 
                     var reply = await RouteAsync(session, msg);
 
-                    // Always persist — even on empty reply (burst image suppression)
                     if (string.IsNullOrWhiteSpace(reply))
                     {
                         await PersistSessionAsync(session, msg.RawText);
@@ -100,28 +90,28 @@ namespace crud_app_backend.Bot.Services
             }
         }
 
-        // ─────────────────────────────────────────────────────────────────────
-        // INSTANT ACK
-        // ─────────────────────────────────────────────────────────────────────
+
 
         private static string? GetAckMessage(UaeSession s, UaeIncomingMessage msg)
         {
             if (s.State == "AWAITING_SHOP_CODE" && msg.MsgType == "text")
                 return s.T("🔍 Verifying shop...", "🔍 শপ যাচাই করা হচ্ছে...", "🔍 दुकान की जाँच हो रही है...");
 
-            // ACK when user is selecting a category — about to load subcategories
-            if (s.State == "AWAITING_CATEGORY" && msg.MsgType == "text" &&
-                msg.RawText != "0" && !string.IsNullOrEmpty(msg.RawText))
-                return s.T("⏳ Loading subcategories...", "⏳ সাবক্যাটাগরি লোড হচ্ছে...", "⏳ उपश्रेणी लोड हो रही है...");
+            if (s.State == "AWAITING_CATEGORY" && msg.MsgType == "text"
+                && msg.RawText != "0" && !string.IsNullOrEmpty(msg.RawText))
+                return s.T("⏳ Loading categories...", "⏳ ক্যাটাগরি লোড হচ্ছে...", "⏳ श्रेणियाँ लोड हो रही हैं...");
 
-            // ACK when user is selecting a subcategory — about to load products
-            if (s.State == "AWAITING_SUBCATEGORY" && msg.MsgType == "text" &&
-                msg.RawText != "0" && !string.IsNullOrEmpty(msg.RawText))
-                return s.T("⏳ Loading products...", "⏳ পণ্য লোড হচ্ছে...", "⏳ उत्पाद लोड हो रहा है...");
+            if (s.State == "AWAITING_SUBCATEGORY" && msg.MsgType == "text"
+                && msg.RawText != "0" && !string.IsNullOrEmpty(msg.RawText))
+                return s.T("⏳ Loading products...", "⏳ পণ্য লোড হচ্ছে...", "⏳ उत्पाद लोड हो रहे हैं...");
 
-            if ((s.State == "AWAITING_CART_ACTION" || s.State == "AWAITING_CART_VIEW") &&
-                msg.RawText == "x")
-                return s.T("⏳ Placing your order...", "⏳ অর্ডার দেওয়া হচ্ছে...", "⏳ ऑर्डर दिया जा रहा है...");
+            if ((s.State == "AWAITING_RETURN_DETAILS" || s.State == "AWAITING_COMPLAINT_DETAILS"
+                 || s.State == "AWAITING_RETURN_CONFIRM" || s.State == "AWAITING_COMPLAINT_CONFIRM")
+                && (msg.MsgType == "image" || msg.MsgType == "audio"))
+                return s.T("⏳ Uploading media...", "⏳ মিডিয়া আপলোড হচ্ছে...", "⏳ मीडिया अपलोड हो रहा है...");
+
+            if (s.State == "AWAITING_ORDER_CONFIRM" && msg.RawText == "y")
+                return s.T("⏳ Placing order...", "⏳ অর্ডার দেওয়া হচ্ছে...", "⏳ ऑर्डर दिया जा रहा है...");
 
             if (s.State == "AWAITING_COMPLAINT_CONFIRM" && msg.RawText == "y")
                 return s.T("⏳ Submitting complaint...", "⏳ অভিযোগ জমা হচ্ছে...", "⏳ शिकायत जमा हो रही है...");
@@ -129,38 +119,32 @@ namespace crud_app_backend.Bot.Services
             if (s.State == "AWAITING_RETURN_CONFIRM" && msg.RawText == "y")
                 return s.T("⏳ Submitting return request...", "⏳ রিটার্ন জমা হচ্ছে...", "⏳ वापसी जमा हो रही है...");
 
-            if (s.State == "AWAITING_AGENT_CONFIRM_1" && msg.RawText == "y")
+            if ((s.State == "AWAITING_AGENT_CONFIRM_1" || s.State == "AWAITING_AGENT_CONFIRM_2")
+                && (msg.RawText == "y" || msg.RawText == "1"))
                 return s.T("⏳ Connecting to agent...", "⏳ এজেন্টের সাথে সংযোগ...", "⏳ एजेंट से जोड़ा जा रहा है...");
-
-            if (s.State == "AWAITING_ORDER_TRACKING" && msg.MsgType == "text")
-                return s.T("🔍 Looking up orders...", "🔍 অর্ডার খোঁজা হচ্ছে...", "🔍 ऑर्डर खोजे जा रहे हैं...");
 
             return null;
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // ROUTER — global shortcuts + state dispatch
+        // ROUTER
         // ─────────────────────────────────────────────────────────────────────
 
         private async Task<string> RouteAsync(UaeSession s, UaeIncomingMessage msg)
         {
             var raw = msg.RawText;
 
-            // ── Global resets ─────────────────────────────────────────────────
+            // Global resets
             if (msg.MsgType == "text" &&
                 new[] { "hi", "hello", "start", "hey", "new" }.Contains(raw))
             {
                 ResetSession(s);
+                Transition(s, "AWAITING_LANG"); // MUST transition — ResetSession sets INIT
+                                                // without this, next message sees INIT again
                 await SendWelcomeAsync(msg.From);
                 return string.Empty;
             }
 
-            // ── Must have lang before anything else ───────────────────────────
-            // IMPORTANT: check State == "INIT" ONLY.
-            // Do NOT add s.Lang == null — when State is AWAITING_LANG,
-            // Lang is legitimately null and the state dispatch below handles it.
-            // Adding Lang == null here causes an infinite welcome loop:
-            //   user sends "1" → state=AWAITING_LANG, lang=null → fires again → loop.
             if (s.State == "INIT")
             {
                 Transition(s, "AWAITING_LANG");
@@ -168,7 +152,7 @@ namespace crud_app_backend.Bot.Services
                 return string.Empty;
             }
 
-            // ── Must be shop-verified for menu shortcuts ───────────────────────
+            // Global shortcuts (shop-verified users only)
             if (s.ShopVerified)
             {
                 if (msg.MsgType == "text" && raw == "menu")
@@ -181,26 +165,18 @@ namespace crud_app_backend.Bot.Services
                 }
             }
 
-            // ── State dispatch ────────────────────────────────────────────────
             return s.State switch
             {
-                "AWAITING_LANG" => HandleLang(s, msg),
+                "AWAITING_LANG" => await HandleLangAsync(s, msg),
                 "AWAITING_SHOP_CODE" => await HandleShopCodeAsync(s, msg),
                 "MAIN_MENU" => await HandleMainMenu(s, msg),
-                "AWAITING_CATEGORY" => await HandleCategoryAsync(s, msg),
-                "AWAITING_SUBCATEGORY" => await HandleSubcategoryAsync(s, msg),
-                "AWAITING_PRODUCT" => HandleProduct(s, msg),
-                "AWAITING_QTY" => HandleQty(s, msg),
-                "AWAITING_CART_ACTION" => await HandleCartActionAsync(s, msg),
-                "AWAITING_CART_VIEW" => await HandleCartViewAsync(s, msg),
+                "AWAITING_ORDER_CONFIRM" => await HandleOrderConfirmAsync(s, msg),
                 "AWAITING_RETURN_DETAILS" => await HandleMediaDetailsAsync(s, msg, "return"),
                 "AWAITING_RETURN_CONFIRM" => await HandleReturnConfirmAsync(s, msg),
                 "AWAITING_COMPLAINT_DETAILS" => await HandleMediaDetailsAsync(s, msg, "complaint"),
                 "AWAITING_COMPLAINT_CONFIRM" => await HandleComplaintConfirmAsync(s, msg),
                 "AWAITING_AGENT_CONFIRM_1" => await HandleAgentConfirm1Async(s, msg),
-                "AWAITING_AGENT_CONFIRM_2" => await HandleAgentConfirm1Async(s, msg), // fallback — no second step
-                "AWAITING_AREA_INPUT" => HandleAreaInput(s, msg),
-                "AWAITING_ORDER_TRACKING" => await HandleOrderTrackingAsync(s, msg),
+                "AWAITING_AGENT_CONFIRM_2" => await HandleAgentConfirm1Async(s, msg), // fallback
                 _ => BuildMainMenu(s),
             };
         }
@@ -209,7 +185,7 @@ namespace crud_app_backend.Bot.Services
         // LANGUAGE SELECTION
         // ─────────────────────────────────────────────────────────────────────
 
-        private string HandleLang(UaeSession s, UaeIncomingMessage msg)
+        private async Task<string> HandleLangAsync(UaeSession s, UaeIncomingMessage msg)
         {
             if (msg.MsgType != "text") return LangPrompt();
 
@@ -219,16 +195,38 @@ namespace crud_app_backend.Bot.Services
                 case "2": s.Lang = "bn"; break;
                 case "3": s.Lang = "hi"; break;
                 default:
-                    return
-                        "❌ Invalid. Reply *1*, *2* or *3*.\n\n" +
-                        LangPrompt();
+                    return "❌ Invalid. Reply *1*, *2* or *3*.\n\n" + LangPrompt();
             }
 
             Transition(s, "AWAITING_SHOP_CODE");
-            return s.T(
-                "✅ Language: *English*\n\n👉 Enter your *Shop Code*.\nExample: *20100090*",
-                "✅ ভাষা: *বাংলা*\n\n👉 আপনার *শপ কোড* দিন।\nউদাহরণ: *20100090*",
-                "✅ भाषा: *हिंदी*\n\n👉 अपना *शॉप कोड* दर्ज करें।\nउदाहरण: *20100090*");
+
+            // Send shopcode image with instructions.
+            // Safe to be async here — the language loop was caused by the missing
+            // Transition(s, "AWAITING_LANG") in the global reset block, not by this.
+            // Even if SendImageAsync throws, the session object in IMemoryCache already
+            // has state=AWAITING_SHOP_CODE (Transition mutated it above), so the next
+            // message will load the correct state from cache.
+            var baseUrl = _config["App:BaseUrl"]?.TrimEnd('/') ?? "https://webhook.prangroup.com";
+            var shopCodeImageUrl = $"{baseUrl}/images/shopcode.jpeg";
+
+            var caption = s.T(
+                "✅ Language set to *English*.\n\n" +
+                "👉 Please send your *Shop Code*.\n" +
+                "Your Shop Code is on your PRAN-RFL Shop Card.\n\n" +
+                "Example: *20100090*",
+
+                "✅ ভাষা বাংলায় সেট হয়েছে।\n\n" +
+                "👉 আপনার *শপ কোড* পাঠান।\n" +
+                "শপ কোড আপনার PRAN-RFL শপ কার্ডে আছে।\n\n" +
+                "উদাহরণ: *20100090*",
+
+                "✅ भाषा हिंदी में सेट है।\n\n" +
+                "👉 अपना *शॉप कोड* भेजें।\n" +
+                "शॉप कोड आपके PRAN-RFL शॉप कार्ड पर है।\n\n" +
+                "उदाहरण: *20100090*");
+
+            await _dialog.SendImageAsync(msg.From, shopCodeImageUrl, caption);
+            return string.Empty; // image+caption already sent above
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -244,27 +242,71 @@ namespace crud_app_backend.Bot.Services
                     "👉 अपना *शॉप कोड* दर्ज करें।\nउदाहरण: *20100090*");
 
             var code = msg.RawText.Trim();
-            var shop = await _spror.ValidateShopAsync(code);
+            var shop = await ValidateShopAsync(code);
 
             if (shop == null)
-            {
                 return s.T(
                     $"❌ *Shop Code not found.*\n\n*{code}* is not recognised.\n\n👉 Check and try again.\nExample: *20100090*",
                     $"❌ *শপ কোড পাওয়া যায়নি।*\n\n*{code}* সঠিক নয়।\n\n👉 আবার চেষ্টা করুন।\nউদাহরণ: *20100090*",
                     $"❌ *शॉप कोड नहीं मिला।*\n\n*{code}* सही नहीं।\n\n👉 पुनः प्रयास करें।\nउदाहरण: *20100090*");
-            }
 
             s.ShopVerified = true;
             s.ShopCode = code;
-            s.ShopUserId = shop.Id;
-            s.ShopName = shop.ShopName;
-            s.ShopCountryId = string.IsNullOrWhiteSpace(shop.ContId) ? "15" : shop.ContId;
+            s.ShopName = shop.Value.ShopName;
+            s.ShopUserId = shop.Value.Id;
             Transition(s, "MAIN_MENU");
 
             return s.T(
-                $"✅ *Shop verified. Welcome back!*\n\n{BuildMainMenuBody("en")}",
+                $"✅ *Shop verified. Welcome!*\n\n{BuildMainMenuBody("en")}",
                 $"✅ *শপ যাচাই হয়েছে। স্বাগতম!*\n\n{BuildMainMenuBody("bn")}",
                 $"✅ *दुकान सत्यापित। स्वागत है!*\n\n{BuildMainMenuBody("hi")}");
+        }
+
+        private async Task<(string ShopName, string Id)?> ValidateShopAsync(string shopCode)
+        {
+            try
+            {
+                var token = _config["Spror:BearerToken"] ?? "224|IEcNubBv4Z9LoXpngVuHthRrSDdIlD0B4RGxNFqT";
+                var contName = _config["Spror:ContName"] ?? "Saudi Arabia";
+                var baseUrl = _config["Spror:BaseUrl"] ?? "https://spror.prgfms.com/api/v1";
+
+                // API requires POST with JSON body — NOT GET with query params
+                var client = _httpFactory.CreateClient();
+                client.Timeout = TimeSpan.FromSeconds(15);
+                client.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"Bearer {token}");
+
+                var resp = await client.PostAsJsonAsync(
+                    $"{baseUrl}/retail/shopDetails",
+                    new { shop_code = shopCode, cont_name = contName });
+
+                if (!resp.IsSuccessStatusCode) return null;
+
+                var json = await resp.Content.ReadAsStringAsync();
+                _logger.LogDebug("[UAE] ValidateShop response: {J}", json.Length > 200 ? json[..200] : json);
+
+                using var doc = JsonDocument.Parse(json);
+                var root = doc.RootElement;
+
+                // Response: { "code": 200, "status": true, "data": [{...}] }
+                if (!root.TryGetProperty("status", out var st) || !st.GetBoolean())
+                    return null;
+
+                if (!root.TryGetProperty("data", out var dataEl) ||
+                    dataEl.ValueKind != JsonValueKind.Array ||
+                    dataEl.GetArrayLength() == 0) return null;
+
+                var shop = dataEl[0];
+                // id is a NUMBER in the response — use .ToString() to handle both
+                var id = shop.TryGetProperty("id", out var idEl) ? idEl.ToString() : "";
+                var siteName = shop.TryGetProperty("site_name", out var snEl) ? snEl.GetString() ?? "" : "";
+
+                return string.IsNullOrEmpty(id) ? null : (siteName, id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[UAE] ValidateShop failed for {Code}", shopCode);
+                return null;
+            }
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -285,371 +327,100 @@ namespace crud_app_backend.Bot.Services
                 "2️⃣  রিটার্ন / রিপ্লেসমেন্ট\n" +
                 "3️⃣  অভিযোগ / ফিডব্যাক\n" +
                 "4️⃣  সাপোর্ট এজেন্ট\n" +
-                "5️⃣  সেলসম্যানের নম্বর\n" +
-                "6️⃣  অর্ডার ট্র্যাক\n" +
                 "0️⃣  ভাষা পরিবর্তন\n\n" +
-                "👉 *1* থেকে *6* বা *0* পাঠান।",
+                "👉 *1*, *2*, *3*, *4* বা *0* পাঠান।",
             "hi" =>
                 "🏪 *PRAN-RFL UAE Sales Support*\n\n" +
                 "1️⃣  ऑर्डर करें\n" +
                 "2️⃣  वापसी / प्रतिस्थापन\n" +
                 "3️⃣  शिकायत / फ़ीडबैक\n" +
                 "4️⃣  सपोर्ट एजेंट\n" +
-                "5️⃣  सेल्समैन नंबर\n" +
-                "6️⃣  ऑर्डर ट्रैक करें\n" +
                 "0️⃣  भाषा बदलें\n\n" +
-                "👉 *1* से *6* या *0* भेजें।",
+                "👉 *1*, *2*, *3*, *4* या *0* भेजें।",
             _ =>
                 "🏪 *PRAN-RFL UAE Sales Support*\n\n" +
                 "1️⃣  Place Order\n" +
                 "2️⃣  Return / Replacement\n" +
                 "3️⃣  Complaint / Feedback\n" +
                 "4️⃣  Connect with Support Agent\n" +
-                "5️⃣  Check Salesman Number\n" +
-                "6️⃣  Track Order\n" +
                 "0️⃣  Change Language\n\n" +
-                "👉 Reply *1*, *2*, *3*, *4*, *5*, *6* or *0*.",
+                "👉 Reply *1*, *2*, *3*, *4* or *0*.",
         };
 
         private async Task<string> HandleMainMenu(UaeSession s, UaeIncomingMessage msg)
         {
             if (msg.MsgType != "text") return BuildUnknown(s);
-            // if/else required — switch expression cannot mix await with non-await arms
-            if (msg.RawText == "1") return await StartOrderAsync(s);
+            if (msg.RawText == "1") return StartPlaceOrder(s);
             if (msg.RawText == "2") return StartReturn(s);
             if (msg.RawText == "3") return StartComplaint(s);
             if (msg.RawText == "4") return StartAgent(s);
-            if (msg.RawText == "5") return await StartSalesmanAsync(s);
-            if (msg.RawText == "6") return StartOrderTracking(s);
             if (msg.RawText == "0") return ResetToLang(s);
             return BuildUnknown(s);
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // FLOW 1 — PLACE ORDER
+        // FLOW 1 — PLACE ORDER (direct CRM ticket, no product browsing)
         // ─────────────────────────────────────────────────────────────────────
 
-        private async Task<string> StartOrderAsync(UaeSession s)
+        private string StartPlaceOrder(UaeSession s)
         {
-            s.Cart.Clear();
-            s.MenuMap.Clear();
-            Transition(s, "AWAITING_CATEGORY");
-            // Load categories immediately — do NOT return empty string here.
-            // If we return empty, the user gets NO reply after selecting "1".
-            return await HandleCategoryAsync(s, new UaeIncomingMessage { RawText = "" });
-        }
-
-        private async Task<string> HandleCategoryAsync(
-            UaeSession s, UaeIncomingMessage msg)
-        {
-            // First entry — msg is the "1" from main menu, load categories
-            if (!s.MenuMap.Any())
-            {
-                var cats = await _spror.GetCategoriesAsync();
-                if (!cats.Any())
-                    return s.T("⚠️ Categories unavailable. Please try again.",
-                               "⚠️ ক্যাটাগরি পাওয়া যাচ্ছে না।",
-                               "⚠️ श्रेणियाँ उपलब्ध नहीं।");
-
-                s.MenuMap.Clear();
-                for (int i = 0; i < cats.Count; i++)
-                    s.MenuMap[(i + 1).ToString()] = $"cat:{cats[i].Id}|{cats[i].Name}";
-
-                return BuildNumberedList(
-                    s.T("🛒 *Place Order — Select Category*",
-                        "🛒 *অর্ডার দিন — ক্যাটাগরি বেছে নিন*",
-                        "🛒 *ऑर्डर करें — श्रेणी चुनें*"),
-                    cats.Select(c => c.Name).ToList(),
-                    s.T("0  Back to Main Menu", "0  মূল মেনু", "0  मुख्य मेनू"),
-                    s.Cart);
-            }
-
-            // User selected a category number
-            if (msg.RawText == "0") return BuildMainMenu(s);
-
-            if (!s.MenuMap.TryGetValue(msg.RawText, out var catVal))
-                return BuildUnknown(s);
-
-            var parts = catVal.Split('|');
-            s.SelectedCatId = parts[0].Replace("cat:", "");
-            s.SelectedCatName = parts.Length > 1 ? parts[1] : "";
-            s.MenuMap.Clear();
-            Transition(s, "AWAITING_SUBCATEGORY");
-
-            var subcats = await _spror.GetSubcategoriesAsync(s.SelectedCatId);
-            if (!subcats.Any())
-                return s.T("⚠️ No subcategories found.", "⚠️ সাবক্যাটাগরি নেই।", "⚠️ उपश्रेणी नहीं मिली।");
-
-            for (int i = 0; i < subcats.Count; i++)
-                s.MenuMap[(i + 1).ToString()] = $"subcat:{subcats[i].Id}|{subcats[i].Name}";
-
-            return BuildNumberedList(
-                s.T($"*{s.SelectedCatName}* — Select Subcategory",
-                    $"*{s.SelectedCatName}* — সাবক্যাটাগরি বেছে নিন",
-                    $"*{s.SelectedCatName}* — उपश्रेणी चुनें"),
-                subcats.Select(c => c.Name).ToList(),
-                s.T("0  Back to Categories", "0  ক্যাটাগরিতে ফিরুন", "0  श्रेणी में वापस"),
-                s.Cart);
-        }
-
-        private async Task<string> HandleSubcategoryAsync(
-            UaeSession s, UaeIncomingMessage msg)
-        {
-            if (msg.RawText == "0")
-            {
-                s.MenuMap.Clear();
-                Transition(s, "AWAITING_CATEGORY");
-                return await HandleCategoryAsync(s, msg);
-            }
-
-            if (!s.MenuMap.TryGetValue(msg.RawText, out var subcatVal))
-                return BuildUnknown(s);
-
-            var parts = subcatVal.Split('|');
-            s.SelectedSubcatId = parts[0].Replace("subcat:", "");
-            s.SelectedSubcatName = parts.Length > 1 ? parts[1] : "";
-            s.MenuMap.Clear();
-
-            var products = await _spror.GetProductsAsync(s.SelectedSubcatId);
-            if (!products.Any())
-                return s.T("⚠️ No products found.", "⚠️ পণ্য পাওয়া যায়নি।", "⚠️ उत्पाद नहीं मिले।");
-
-            for (int i = 0; i < products.Count; i++)
-                s.MenuMap[(i + 1).ToString()] = $"pid:{products[i].Id}";
-
-            // Store full product data keyed by pid for when user selects
-            // We store it in MenuMap with a prefix to retrieve later
-            foreach (var p in products)
-                // Name|Price|OldPrice|Code|ImageUrl|Factor|GroupId|PriceId
-                s.MenuMap[$"__p:{p.Id}"] = FormattableString.Invariant(
-                    $"{p.Name}|{p.Price}|{p.OldPrice}|{p.Code}|{p.ImageUrl}|{p.Factor}|{p.GroupId}|{p.PriceId}");
-
-            Transition(s, "AWAITING_PRODUCT");
-
-            var lines = products.Select(p =>
-                $"{p.Name}  *{p.Price:F3} SAR*").ToList();
-
-            return BuildNumberedList(
-                s.T($"*{s.SelectedCatName} > {s.SelectedSubcatName}*\n\nEnter product number to select:",
-                    $"*{s.SelectedCatName} > {s.SelectedSubcatName}*\n\nপণ্য নম্বর দিয়ে নির্বাচন করুন:",
-                    $"*{s.SelectedCatName} > {s.SelectedSubcatName}*\n\nउत्पाद संख्या दर्ज करके चुनें:"),
-                lines,
-                s.T("0  Back to Subcategories", "0  সাবক্যাটাগরিতে ফিরুন", "0  उपश्रेणी में वापस"),
-                s.Cart);
-        }
-
-        private string HandleProduct(UaeSession s, UaeIncomingMessage msg)
-        {
-            if (msg.RawText == "0")
-            {
-                Transition(s, "AWAITING_SUBCATEGORY");
-                return s.T("Please select a subcategory.",
-                           "সাবক্যাটাগরি বেছে নিন।",
-                           "उपश्रेणी चुनें।");
-            }
-
-            if (!s.MenuMap.TryGetValue(msg.RawText, out var pidVal) ||
-                !pidVal.StartsWith("pid:"))
-                return BuildUnknown(s);
-
-            var pid = pidVal.Replace("pid:", "");
-            if (!s.MenuMap.TryGetValue($"__p:{pid}", out var pData))
-                return BuildUnknown(s);
-
-            var parts = pData.Split('|');
-            s.PendingCartPid = pid;
-            s.PendingCartName = parts[0];
-            s.PendingCartPrice = parts.Length > 1 && double.TryParse(parts[1],
-                System.Globalization.NumberStyles.Float,
-                System.Globalization.CultureInfo.InvariantCulture, out var pr) ? pr : 0;
-
-            // Store full product metadata for order payload
-            var item = new UaeCartItem
-            {
-                Pid = pid,
-                Name = parts[0],
-                Price = s.PendingCartPrice,
-                OldPrice = parts.Length > 2 && double.TryParse(parts[2],
-                    System.Globalization.NumberStyles.Float,
-                    System.Globalization.CultureInfo.InvariantCulture, out var op) ? op : 0,
-                ProductCode = parts.Length > 3 ? parts[3] : "",
-                ImageUrl = parts.Length > 4 ? parts[4] : "",
-                Factor = parts.Length > 5 && int.TryParse(parts[5], out var f) ? f : 1,
-                GroupId = parts.Length > 6 ? parts[6] : "",
-                PriceId = parts.Length > 7 ? parts[7] : "",
-                Qty = 0,
-            };
-            // Temporarily store in MenuMap as pending full item
-            s.MenuMap["__pending_item"] = JsonSerializer.Serialize(item);
-
-            Transition(s, "AWAITING_QTY");
+            Transition(s, "AWAITING_ORDER_CONFIRM");
             return s.T(
-                $"*{s.PendingCartName}* — {s.PendingCartPrice:F3} SAR per unit\n\nHow many units?\n\n0  Back to Products\nS  Connect to Support Agent",
-                $"*{s.PendingCartName}* — {s.PendingCartPrice:F3} SAR\n\nকত পিস লাগবে?\n\n0  পণ্যে ফিরুন\nS  এজেন্টের সাথে যোগাযোগ",
-                $"*{s.PendingCartName}* — {s.PendingCartPrice:F3} SAR\n\nकितनी यूनिट चाहिए?\n\n0  उत्पाद में वापस\nS  एजेंट से जुड़ें");
+                "🛒 *Place Order*\n\n" +
+                "Our sales team will contact you to take your order.\n\n" +
+                "Send *Y* to Confirm\n" +
+                "Send *N* to Cancel\n\n" +
+                "👉 Send *0* to go back to main menu",
+
+                "🛒 *অর্ডার দিন*\n\n" +
+                "আমাদের সেলস টিম আপনার অর্ডার নিতে যোগাযোগ করবে।\n\n" +
+                "নিশ্চিত করতে *Y* পাঠান\n" +
+                "বাতিল করতে *N* পাঠান\n\n" +
+                "👉 মূল মেনুতে যেতে *0* পাঠান",
+
+                "🛒 *ऑर्डर करें*\n\n" +
+                "हमारी सेल्स टीम आपका ऑर्डर लेने के लिए संपर्क करेगी।\n\n" +
+                "*Y* भेजें पुष्टि के लिए\n" +
+                "*N* भेजें रद्द करने के लिए\n\n" +
+                "👉 मुख्य मेनू पर जाने के लिए *0* भेजें");
         }
 
-        private string HandleQty(UaeSession s, UaeIncomingMessage msg)
+        private async Task<string> HandleOrderConfirmAsync(UaeSession s, UaeIncomingMessage msg)
         {
-            if (msg.RawText == "0")
+            if (msg.RawText == "n" || msg.RawText == "0") return BuildMainMenu(s);
+            if (msg.RawText != "y") return StartPlaceOrder(s);
+
+            var req = new UaeCrmRequest
             {
-                Transition(s, "AWAITING_PRODUCT");
-                return s.T("Select a product.", "পণ্য বেছে নিন।", "उत्पाद चुनें।");
-            }
-
-            if (!int.TryParse(msg.RawText, out var qty) || qty <= 0)
-                return s.T(
-                    "❌ Please reply with a valid number (e.g. 1, 2, 5).",
-                    "❌ সংখ্যা পাঠান (যেমন 1, 2, 5)।",
-                    "❌ एक वैध संख्या भेजें (जैसे 1, 2, 5)।");
-
-            // Find existing cart item or add new
-            var pendingJson = s.MenuMap.GetValueOrDefault("__pending_item");
-            UaeCartItem? newItem = null;
-            if (!string.IsNullOrEmpty(pendingJson))
-                try { newItem = JsonSerializer.Deserialize<UaeCartItem>(pendingJson); } catch { }
-
-            if (newItem == null)
-                newItem = new UaeCartItem
-                {
-                    Pid = s.PendingCartPid ?? "",
-                    Name = s.PendingCartName ?? "",
-                    Price = s.PendingCartPrice,
-                    Qty = 0,
-                };
-
-            newItem.Qty = qty;
-            s.MenuMap.Remove("__pending_item");
-
-            var existing = s.Cart.FirstOrDefault(c => c.Pid == newItem.Pid);
-            if (existing != null) existing.Qty += qty;
-            else s.Cart.Add(newItem);
-
-            Transition(s, "AWAITING_CART_ACTION");
-            return BuildCartAddedMessage(s, newItem);
-        }
-
-        private async Task<string> HandleCartActionAsync(
-            UaeSession s, UaeIncomingMessage msg)
-        {
-            return msg.RawText switch
-            {
-                "1" => await GoToCategories(s),
-                "c" => BuildCartView(s),
-                "x" => await CheckoutAsync(s),
-                "0" => await GoToCategories(s),
-                _ => BuildUnknown(s),
-            };
-        }
-
-        private async Task<string> HandleCartViewAsync(
-            UaeSession s, UaeIncomingMessage msg)
-        {
-            if (msg.RawText == "x") return await CheckoutAsync(s);
-            if (msg.RawText == "1") return await GoToCategories(s);
-            if (msg.RawText == "c") return ClearCartAction(s);
-
-            // remove:N
-            var removeMatch = Regex.Match(msg.RawText, @"^remove:(\d+)$");
-            if (removeMatch.Success)
-            {
-                var idx = int.Parse(removeMatch.Groups[1].Value) - 1;
-                if (idx >= 0 && idx < s.Cart.Count)
-                {
-                    s.Cart.RemoveAt(idx);
-                    if (!s.Cart.Any()) return await StartOrderAsync(s);
-                    return BuildCartView(s);
-                }
-            }
-
-            return BuildCartView(s);
-        }
-
-        private async Task<string> CheckoutAsync(UaeSession s)
-        {
-            if (!s.Cart.Any())
-                return s.T("🛒 Your cart is empty. Reply *1* to start shopping.",
-                           "🛒 কার্ট খালি। *1* পাঠিয়ে শপিং শুরু করুন।",
-                           "🛒 कार्ट खाली है। *1* भेजें।");
-
-            var req = new PlaceOrderRequest
-            {
-                UserId = s.ShopUserId ?? "",
-                CountryId = s.ShopCountryId ?? "15",
-                GroupId = s.Cart.FirstOrDefault()?.GroupId ?? "",
-                PriceId = s.Cart.FirstOrDefault()?.PriceId ?? "",
-                TotalAmount = s.Cart.Sum(c => c.Amount),
-                Items = s.Cart.Select(c => new UaeOrderItem
-                {
-                    Pid = c.Pid,
-                    Name = c.Name,
-                    Code = c.ProductCode,
-                    ImageUrl = c.ImageUrl,
-                    Price = c.Price,
-                    OldPrice = c.OldPrice,
-                    Qty = c.Qty,
-                    Factor = c.Factor,
-                    Amount = c.Amount,
-                    GroupId = c.GroupId,
-                    PriceId = c.PriceId,
-                }).ToList(),
+                ShopCode = s.ShopCode ?? "",
+                WhatsappNumber = s.Phone,
+                TicketType = "PLACE_ORDER",
+                Description = $"Place order request from shop: {s.ShopName ?? s.ShopCode}",
             };
 
-            var result = await _spror.PlaceOrderAsync(req);
-            if (!result.Success)
-            {
-                return s.T(
-                    $"❌ Order failed.\n\n{result.Error}\n\nSend *X* to retry or *menu* for main menu.",
-                    $"❌ অর্ডার ব্যর্থ।\n\n{result.Error}\n\n*X* পাঠিয়ে আবার চেষ্টা করুন।",
-                    $"❌ ऑर्डर विफल।\n\n{result.Error}\n\n*X* भेजें पुनः प्रयास के लिए।");
-            }
-
-            var total = s.Cart.Sum(c => c.Amount);
-            var itemLines = string.Join("\n",
-                s.Cart.Select(c => $"  {c.Name} x{c.Qty} = {c.Amount:F3} SAR"));
-
-            s.Cart.Clear();
-            s.MenuMap.Clear();
+            var result = await _crm.SubmitAsync(req);
             Transition(s, "MAIN_MENU");
 
-            return s.T(
-                $"✅ *Order Placed Successfully*\n\n" +
-                $"Order ID : {result.OrderId}\n" +
-                $"Total    : {total:F3} SAR\n\n" +
-                $"Items:\n{itemLines}\n\n" +
-                "Our team will contact you to confirm delivery.\n\n" +
-                "*menu*  Back to Main Menu",
+            return result.Success
+                ? s.T(
+                    "✅ *Order Request Submitted*\n\n" +
+                    (result.TicketId != null ? $"Ticket ID : *{result.TicketId}*\n\n" : "") +
+                    "Our sales team will contact you shortly to take your order.\n\n" +
+                    "👉 Send *menu* for Main Menu\n" ,
 
-                $"✅ *অর্ডার সফল হয়েছে*\n\n" +
-                $"অর্ডার আইডি : {result.OrderId}\n" +
-                $"মোট : {total:F3} SAR\n\n" +
-                $"পণ্যসমূহ:\n{itemLines}\n\n" +
-                "আমাদের টিম শীঘ্রই আপনার সাথে যোগাযোগ করবে।\n\n" +
-                "*menu*  মূল মেনু",
+                    "✅ *অর্ডার রিকোয়েস্ট জমা হয়েছে*\n\n" +
+                    (result.TicketId != null ? $"টিকেট আইডি : *{result.TicketId}*\n\n" : "") +
+                    "আমাদের সেলস টিম শীঘ্রই অর্ডার নিতে যোগাযোগ করবে।\n\n" +
+                    "👉 *menu* — মূল মেনু\n" ,
 
-                $"✅ *ऑर्डर सफलतापूर्वक दिया*\n\n" +
-                $"ऑर्डर ID : {result.OrderId}\n" +
-                $"कुल : {total:F3} SAR\n\n" +
-                $"आइटम:\n{itemLines}\n\n" +
-                "हमारी टीम जल्द आपसे संपर्क करेगी।\n\n" +
-                "*menu*  मुख्य मेनू");
-        }
-
-        private async Task<string> GoToCategories(UaeSession s)
-        {
-            s.MenuMap.Clear();
-            Transition(s, "AWAITING_CATEGORY");
-            return await HandleCategoryAsync(s, new UaeIncomingMessage { RawText = "" });
-        }
-
-        private string ClearCartAction(UaeSession s)
-        {
-            s.Cart.Clear();
-            s.MenuMap.Clear();
-            Transition(s, "AWAITING_CATEGORY");
-            return s.T("🗑 Cart cleared. Select a category to start again.",
-                       "🗑 কার্ট খালি হয়েছে।",
-                       "🗑 कार्ट साफ़।");
+                    "✅ *ऑर्डर अनुरोध जमा हुआ*\n\n" +
+                    (result.TicketId != null ? $"टिकट ID : *{result.TicketId}*\n\n" : "") +
+                    "हमारी सेल्स टीम जल्द आपसे संपर्क कर ऑर्डर लेगी।\n\n" +
+                    "👉 *menu* — मुख्य मेनू\n" )
+                : s.T(
+                    $"❌ Request failed.\n{result.Error}\n\nSend *Y* to retry or *menu* for main menu.",
+                    $"❌ ব্যর্থ।\n{result.Error}\n\n*Y* পাঠিয়ে আবার চেষ্টা করুন।",
+                    $"❌ विफल।\n{result.Error}\n\n*Y* भेजें पुनः प्रयास के लिए।");
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -679,13 +450,8 @@ namespace crud_app_backend.Bot.Services
 
         private async Task<string> HandleReturnConfirmAsync(UaeSession s, UaeIncomingMessage msg)
         {
-            if (msg.RawText == "y") return await SubmitMediaAsync(s, "grv");
-            if (msg.RawText == "n")
-            {
-                ClearMedia(s);
-                return StartReturn(s);
-            }
-            // More details — treat as additional media
+            if (msg.RawText == "y") return await SubmitMediaAsync(s, "PRODUCT_REPLACEMENT");
+            if (msg.RawText == "n") { ClearMedia(s); return StartReturn(s); }
             Transition(s, "AWAITING_RETURN_DETAILS");
             return await HandleMediaDetailsAsync(s, msg, "return");
         }
@@ -717,12 +483,8 @@ namespace crud_app_backend.Bot.Services
 
         private async Task<string> HandleComplaintConfirmAsync(UaeSession s, UaeIncomingMessage msg)
         {
-            if (msg.RawText == "y") return await SubmitMediaAsync(s, "complaint");
-            if (msg.RawText == "n")
-            {
-                ClearMedia(s);
-                return StartComplaint(s);
-            }
+            if (msg.RawText == "y") return await SubmitMediaAsync(s, "COMPLAIN");
+            if (msg.RawText == "n") { ClearMedia(s); return StartComplaint(s); }
             Transition(s, "AWAITING_COMPLAINT_DETAILS");
             return await HandleMediaDetailsAsync(s, msg, "complaint");
         }
@@ -737,8 +499,7 @@ namespace crud_app_backend.Bot.Services
             var confirmState = flowType == "return"
                 ? "AWAITING_RETURN_CONFIRM"
                 : "AWAITING_COMPLAINT_CONFIRM";
-
-            var alreadyInConfirm = s.State == confirmState;
+            var alreadyConfirm = s.State == confirmState;
 
             if (msg.MsgType == "text")
             {
@@ -753,10 +514,15 @@ namespace crud_app_backend.Bot.Services
                     msg.MessageId, msg.ImageId, msg.ImageMime,
                     msg.From, msg.SenderName, msg.Timestamp, "images",
                     caption: msg.ImageCaption);
-                if (imageId != null) s.MediaImages.Add(imageId);
+                if (imageId != null)
+                    s.MediaImages.Add(imageId);
+                else
+                    return s.T(
+                        "⚠️ Image could not be uploaded. Please try again.",
+                        "⚠️ ছবি আপলোড হয়নি। আবার পাঠান।",
+                        "⚠️ फ़ोटो अपलोड नहीं हुई। पुनः भेजें।");
 
-                // Burst suppression
-                if (alreadyInConfirm)
+                if (alreadyConfirm)
                 {
                     var now = msg.Timestamp > 0
                         ? DateTimeOffset.FromUnixTimeSeconds(msg.Timestamp).UtcDateTime
@@ -766,7 +532,7 @@ namespace crud_app_backend.Bot.Services
                     _state.LastImageTime[s.Phone] = now;
                     if (isBurst) return string.Empty;
                 }
-                else if (msg.MsgType == "image")
+                else
                 {
                     _state.LastImageTime[s.Phone] = msg.Timestamp > 0
                         ? DateTimeOffset.FromUnixTimeSeconds(msg.Timestamp).UtcDateTime
@@ -778,15 +544,21 @@ namespace crud_app_backend.Bot.Services
                 var voiceId = await SaveMediaToDiskAsync(
                     msg.MessageId, msg.AudioId, msg.AudioMime,
                     msg.From, msg.SenderName, msg.Timestamp, "audio");
-                if (voiceId != null) s.MediaVoices.Add(voiceId);
+                if (voiceId != null)
+                    s.MediaVoices.Add(voiceId);
+                else
+                    return s.T(
+                        "⚠️ Voice note could not be uploaded. Please try again.",
+                        "⚠️ ভয়েস আপলোড হয়নি। আবার পাঠান।",
+                        "⚠️ आवाज़ अपलोड नहीं हुई। पुनः भेजें।");
             }
             else
             {
-                return string.Empty; // unknown media type — silent ignore
+                return string.Empty;
             }
 
             Transition(s, confirmState);
-            if (alreadyInConfirm && msg.MsgType == "image") return string.Empty;
+            if (alreadyConfirm && msg.MsgType == "image") return string.Empty;
 
             return s.T(
                 "✅ *Received.*\n\n" +
@@ -827,7 +599,7 @@ namespace crud_app_backend.Bot.Services
                     $"❌ জমা ব্যর্থ।\n{result.Error}",
                     $"❌ जमा विफल।\n{result.Error}");
 
-            var ticketLabel = ticketType == "grv"
+            var ticketLabel = ticketType == "PRODUCT_REPLACEMENT"
                 ? s.T("Return Request", "রিটার্ন রিকোয়েস্ট", "वापसी अनुरोध")
                 : s.T("Complaint", "অভিযোগ", "शिकायत");
 
@@ -835,8 +607,7 @@ namespace crud_app_backend.Bot.Services
                 $"✅ *{ticketLabel} Submitted*\n\n" +
                 (result.TicketId != null ? $"Ticket ID : *{result.TicketId}*\n\n" : "") +
                 "Our team will contact you shortly.\n\n" +
-                "👉 Send *menu* for Main Menu\n" +
-                "👉 Send *S* to connect with Agent",
+                "👉 Send *menu* for Main Menu\n" ,
 
                 $"✅ *{ticketLabel} জমা হয়েছে*\n\n" +
                 (result.TicketId != null ? $"টিকেট আইডি : *{result.TicketId}*\n\n" : "") +
@@ -852,7 +623,7 @@ namespace crud_app_backend.Bot.Services
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // FLOW 4 — AGENT (double confirm)
+        // FLOW 4 — CONNECT WITH SUPPORT AGENT
         // ─────────────────────────────────────────────────────────────────────
 
         private string StartAgent(UaeSession s)
@@ -881,54 +652,22 @@ namespace crud_app_backend.Bot.Services
                 "*N* भेजें रद्द करने के लिए\n\n" +
                 "👉 मुख्य मेनू पर जाने के लिए *0* भेजें");
 
-        // Single-step: Y = connect immediately, N/0 = back
         private async Task<string> HandleAgentConfirm1Async(
             UaeSession s, UaeIncomingMessage msg)
         {
             if (msg.RawText == "y") return await ConnectAgentAsync(s);
             if (msg.RawText == "n" || msg.RawText == "0") return BuildMainMenu(s);
-            return BuildAgentConfirm1(s); // re-show menu on invalid input
+            return BuildAgentConfirm1(s);
         }
 
-        // Submits agent request to CRM with cart + category context
         private async Task<string> ConnectAgentAsync(UaeSession s)
         {
-            // Build description from browsing context + cart
-            var desc = new System.Text.StringBuilder("User requested live agent support.");
-
-            if (!string.IsNullOrEmpty(s.SelectedCatName))
-            {
-                desc.Append($" Category: {s.SelectedCatName}");
-                if (!string.IsNullOrEmpty(s.SelectedSubcatName))
-                    desc.Append($" > {s.SelectedSubcatName}");
-            }
-
-            if (s.Cart.Any())
-            {
-                desc.Append(" | Cart: ");
-                desc.Append(string.Join(", ",
-                    s.Cart.Select(c => $"{c.Name} x{c.Qty} ({c.Amount:F3} SAR)")));
-                desc.Append($" | Total: {s.Cart.Sum(c => c.Amount):F3} SAR");
-            }
-
             var req = new UaeCrmRequest
             {
                 ShopCode = s.ShopCode ?? "",
                 WhatsappNumber = s.Phone,
                 TicketType = "connect_to_agent",
-                Description = desc.ToString(),
-                CartItems = s.Cart.Any()
-                    ? JsonSerializer.Serialize(s.Cart.Select(c => new
-                    {
-                        product_id = c.Pid,
-                        product_name = c.Name,
-                        product_code = c.ProductCode,
-                        product_price = c.Price,
-                        product_quantity = c.Qty,
-                        amount = c.Amount,
-                        factor = c.Factor,
-                    }))
-                    : "",
+                Description = $"User requested live agent support. Shop: {s.ShopName ?? s.ShopCode}",
             };
 
             var result = await _crm.SubmitAsync(req);
@@ -957,151 +696,6 @@ namespace crud_app_backend.Bot.Services
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // FLOW 5 — SALESMAN
-        // ─────────────────────────────────────────────────────────────────────
-
-        private async Task<string> StartSalesmanAsync(UaeSession s)
-        {
-            Transition(s, "MAIN_MENU");
-
-            if (string.IsNullOrEmpty(s.ShopCode))
-                return s.T("❌ Shop not verified.", "❌ শপ যাচাই হয়নি।", "❌ दुकान सत्यापित नहीं।");
-
-            var countryId = string.IsNullOrEmpty(s.ShopCountryId) ? "15" : s.ShopCountryId;
-            var result = await _spror.GetSrAgentsAsync(s.ShopCode, countryId);
-
-            if (!result.Success || !result.Agents.Any())
-                return s.T(
-                    "❌ No salesman found for your shop.\n\nPlease contact support.\n\n*menu*  Main Menu",
-                    "❌ শপের জন্য সেলসম্যান পাওয়া যায়নি।\n\n*menu*  মূল মেনু",
-                    "❌ दुकान के लिए सेल्समैन नहीं मिला।\n\n*menu*  मुख्य मेनू");
-
-            var siteLine = !string.IsNullOrEmpty(result.SiteName)
-                ? s.T("📋 *Salesman List — " + result.SiteName + "*",
-                      "📋 *সেলসম্যান — " + result.SiteName + "*",
-                      "📋 *सेल्समैन — " + result.SiteName + "*")
-                : s.T("📋 *Your Salesman List*", "📋 *সেলসম্যান তালিকা*", "📋 *सेल्समैन सूची*");
-
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine(siteLine);
-            sb.AppendLine();
-            for (int i = 0; i < result.Agents.Count; i++)
-                sb.AppendLine(string.Format("{0}. {1}  (ID: {2})",
-                    i + 1, result.Agents[i].StaffName, result.Agents[i].StaffId));
-            sb.AppendLine();
-            sb.Append(s.T("*menu*  Back to Main Menu", "*menu*  মূল মেনু", "*menu*  मुख्य मेनू"));
-            return sb.ToString();
-        }
-        private string HandleAreaInput(UaeSession s, UaeIncomingMessage msg)
-        {
-            if (msg.RawText == "0") return BuildMainMenu(s);
-            if (msg.MsgType != "text") return BuildUnknown(s);
-
-            var salesman = SalesmanData.Find(msg.RawText);
-            Transition(s, "MAIN_MENU");
-
-            if (salesman == null)
-                return s.T(
-                    $"❌ No salesman found for *{msg.RawText}*.\n\nPlease try a nearby area.\n\n*menu*  Main Menu",
-                    $"❌ *{msg.RawText}* এলাকায় সেলসম্যান পাওয়া যায়নি।\n\n*menu*  মূল মেনু",
-                    $"❌ *{msg.RawText}* क्षेत्र में सेल्समैन नहीं मिला।\n\n*menu*  मुख्य मेनू");
-
-            return s.T(
-                $"👤 *Salesman — {msg.RawText}*\n\n{salesman}\n\n*menu*  Main Menu",
-                $"👤 *সেলসম্যান — {msg.RawText}*\n\n{salesman}\n\n*menu*  মূল মেনু",
-                $"👤 *सेल्समैन — {msg.RawText}*\n\n{salesman}\n\n*menu*  मुख्य मेनू");
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
-        // FLOW 6 — ORDER TRACKING
-        // ─────────────────────────────────────────────────────────────────────
-
-        private string StartOrderTracking(UaeSession s)
-        {
-            Transition(s, "AWAITING_ORDER_TRACKING");
-            return s.T(
-                "📦 *Track Order*\n\n👉 Send *1* to view your orders.\n\nSend *0* to go back.",
-                "📦 *অর্ডার ট্র্যাক*\n\n👉 অর্ডার দেখতে *1* পাঠান।\n\n*0* পাঠান ফিরতে।",
-                "📦 *ऑर्डर ट्रैक*\n\n👉 ऑर्डर देखने के लिए *1* भेजें।\n\n*0* भेजें वापस जाने के लिए।");
-        }
-
-        private async Task<string> HandleOrderTrackingAsync(
-            UaeSession s, UaeIncomingMessage msg)
-        {
-            if (msg.RawText == "0") return BuildMainMenu(s);
-
-            if (string.IsNullOrEmpty(s.ShopUserId))
-                return s.T("Shop not verified.", "শপ যাচাই হয়নি।", "दुकान सत्यापित नहीं।");
-
-            var json = await _spror.GetOrdersAsync(s.ShopUserId);
-            Transition(s, "MAIN_MENU");
-
-            try
-            {
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-
-                // Response: root → data (paginated object) → data (array of orders)
-                if (!root.TryGetProperty("data", out var outerData) ||
-                    outerData.ValueKind != JsonValueKind.Object)
-                    return s.T("📦 No orders found.\n\n*menu*  Main Menu",
-                               "📦 কোনো অর্ডার নেই।\n\n*menu*  মূল মেনু",
-                               "📦 कोई ऑर्डर नहीं।\n\n*menu*  मुख्य मेनू");
-
-                if (!outerData.TryGetProperty("data", out var dataEl) ||
-                    dataEl.ValueKind != JsonValueKind.Array ||
-                    dataEl.GetArrayLength() == 0)
-                    return s.T("📦 No orders found.\n\n*menu*  Main Menu",
-                               "📦 কোনো অর্ডার নেই।\n\n*menu*  মূল মেনু",
-                               "📦 कोई ऑर्डर नहीं।\n\n*menu*  मुख्य मेनू");
-
-                var lines = new List<string>();
-                int i = 1;
-                foreach (var order in dataEl.EnumerateArray())
-                {
-                    // Actual field names from API response
-                    var oid = order.TryGetProperty("ordm_ornm", out var o) ? o.ToString() : "-";
-                    var date = order.TryGetProperty("ordm_date", out var dt) ? dt.ToString() : "";
-                    var status = order.TryGetProperty("status", out var st) ? st.ToString() : "-";
-                    var total = order.TryGetProperty("ordm_amnt", out var ta) ? ta.ToString() : "-";
-
-                    // Product summary from nested products array
-                    var productLines = new List<string>();
-                    if (order.TryGetProperty("products", out var prods) &&
-                        prods.ValueKind == JsonValueKind.Array)
-                    {
-                        foreach (var p in prods.EnumerateArray())
-                        {
-                            var pname = p.TryGetProperty("name", out var pn) ? pn.ToString() : "";
-                            var qty = p.TryGetProperty("ordd_qnty", out var pq) ? pq.ToString() : "";
-                            if (!string.IsNullOrEmpty(pname))
-                                productLines.Add($"   • {pname} x{qty}");
-                        }
-                    }
-
-                    var productSummary = productLines.Any()
-                        ? "\n" + string.Join("\n", productLines)
-                        : "";
-
-                    lines.Add($"{i}. *{oid}*  {date}\n   {status}  |  {total} SAR{productSummary}");
-                    i++;
-                    if (i > 10) { lines.Add("..."); break; }
-                }
-
-                return s.T(
-                    $"📦 *Your Orders*\n\n{string.Join("\n\n", lines)}\n\n*menu*  Main Menu",
-                    $"📦 *আপনার অর্ডার*\n\n{string.Join("\n\n", lines)}\n\n*menu*  মূল মেনু",
-                    $"📦 *आपके ऑर्डर*\n\n{string.Join("\n\n", lines)}\n\n*menu*  मुख्य मेनू");
-            }
-            catch
-            {
-                return s.T("⚠️ Could not load orders.\n\n*menu*  Main Menu",
-                           "⚠️ অর্ডার লোড হয়নি।",
-                           "⚠️ ऑर्डर लोड नहीं हुए।");
-            }
-        }
-
-        // ─────────────────────────────────────────────────────────────────────
         // WELCOME WITH LOGO
         // ─────────────────────────────────────────────────────────────────────
 
@@ -1109,8 +703,7 @@ namespace crud_app_backend.Bot.Services
         {
             var baseUrl = _config["App:BaseUrl"]?.TrimEnd('/') ?? "https://webhook.prangroup.com";
             var logoUrl = $"{baseUrl}/images/pran-rfl-logo.jpg";
-            var caption = LangPrompt();
-            await _dialog.SendImageAsync(phone, logoUrl, caption, ct);
+            await _dialog.SendImageAsync(phone, logoUrl, LangPrompt(), ct);
         }
 
         private static string LangPrompt() =>
@@ -1130,18 +723,39 @@ namespace crud_app_backend.Bot.Services
             string from, string senderName, long timestamp,
             string subFolder, string? caption = null)
         {
+            // Guard: empty mediaId means WhatsApp didn't send a media ID
+            if (string.IsNullOrWhiteSpace(mediaId))
+            {
+                _logger.LogWarning("[UAE] SaveMedia skipped — empty mediaId msgId={Id}", messageId);
+                return null;
+            }
+
+            // Guard: WebRootPath must be set
+            if (string.IsNullOrWhiteSpace(_env.WebRootPath))
+            {
+                _logger.LogError("[UAE] SaveMedia failed — WebRootPath is null or empty");
+                return null;
+            }
+
             try
             {
+                // Step 1: Download from 360dialog
+                _logger.LogInformation("[UAE] Downloading media mediaId={Id} type={T}", mediaId, subFolder);
                 var (bytes, mime) = await _dialog.DownloadMediaAsync(mediaId, mimeType);
+                _logger.LogInformation("[UAE] Downloaded {B} bytes mime={M}", bytes.Length, mime);
+
+                // Step 2: Save to disk
                 var ext = MimeToExt(mime, subFolder == "audio" ? ".ogg" : ".jpg");
                 var fileName = $"{messageId}{ext}";
                 var folder = Path.Combine(_env.WebRootPath, "wa-media", subFolder);
                 Directory.CreateDirectory(folder);
-                await File.WriteAllBytesAsync(Path.Combine(folder, fileName), bytes);
+                var filePath = Path.Combine(folder, fileName);
+                await File.WriteAllBytesAsync(filePath, bytes);
+                _logger.LogInformation("[UAE] Saved media to {Path}", filePath);
 
+                // Step 3: Record in DB (non-critical — failure here should NOT fail the upload)
                 var baseUrl = _config["App:BaseUrl"] ?? "https://webhook.prangroup.com";
                 var fileUrl = $"{baseUrl}/wa-media/{subFolder}/{fileName}";
-
                 try
                 {
                     await _msgRepo.InsertAsync(new WhatsAppMessage
@@ -1165,12 +779,32 @@ namespace crud_app_backend.Bot.Services
                 {
                     _logger.LogDebug("[UAE] Media duplicate skipped: {Id}", messageId);
                 }
+                catch (Exception dbEx)
+                {
+                    // DB insert failed but file IS on disk — log and continue
+                    _logger.LogWarning(dbEx, "[UAE] Media DB insert failed (file saved OK): {Id}", messageId);
+                }
 
-                return messageId;
+                // Return full disk path — UaeCrmService reads bytes from here
+                return filePath;
+            }
+            catch (HttpRequestException httpEx)
+            {
+                _logger.LogError(httpEx,
+                    "[UAE] SaveMedia — 360dialog download failed mediaId={Id}: {Msg}",
+                    mediaId, httpEx.Message);
+                return null;
+            }
+            catch (IOException ioEx)
+            {
+                _logger.LogError(ioEx,
+                    "[UAE] SaveMedia — disk write failed folder=wa-media/{Sub}: {Msg}",
+                    subFolder, ioEx.Message);
+                return null;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "[UAE] SaveMedia failed msgId={Id}", messageId);
+                _logger.LogError(ex, "[UAE] SaveMedia failed msgId={Id} mediaId={MId}", messageId, mediaId);
                 return null;
             }
         }
@@ -1189,18 +823,15 @@ namespace crud_app_backend.Bot.Services
             if (session.State == "INIT" && row.CurrentStep != "INIT")
                 session.State = row.CurrentStep;
 
-            var opts = new MemoryCacheEntryOptions()
-                .SetSlidingExpiration(TimeSpan.FromMinutes(60));
-            _cache.Set($"uae:{phone}", session, opts);
+            _cache.Set($"uae:{phone}", session,
+                new MemoryCacheEntryOptions().SetSlidingExpiration(TimeSpan.FromMinutes(60)));
             return session;
         }
 
         private async Task PersistSessionAsync(UaeSession s, string rawText)
         {
-            var opts = new MemoryCacheEntryOptions()
-                .SetSlidingExpiration(TimeSpan.FromMinutes(60));
-            _cache.Set($"uae:{s.Phone}", s, opts);
-
+            _cache.Set($"uae:{s.Phone}", s,
+                new MemoryCacheEntryOptions().SetSlidingExpiration(TimeSpan.FromMinutes(60)));
             try
             {
                 await _sessionSvc.UpsertSessionAsync(new UpsertSessionRequestDto
@@ -1211,10 +842,12 @@ namespace crud_app_backend.Bot.Services
                     TempData = s.Save(),
                     RawMessage = rawText,
                 });
+                _logger.LogInformation("[UAE] PersistSession OK phone={Phone} step={Step}", s.Phone, s.State);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "[UAE] PersistSession failed {Phone}", s.Phone);
+                _logger.LogError(ex, "[UAE] PersistSession FAILED phone={Phone} step={Step} error={Msg} inner={Inner}",
+                    s.Phone, s.State, ex.Message, ex.InnerException?.Message ?? "none");
             }
         }
 
@@ -1240,8 +873,6 @@ namespace crud_app_backend.Bot.Services
             s.State = "INIT";
             s.PreviousState = "INIT";
             s.Lang = null;
-            s.Cart.Clear();
-            s.MenuMap.Clear();
             ClearMedia(s);
         }
 
@@ -1257,74 +888,6 @@ namespace crud_app_backend.Bot.Services
                 "❌ *Invalid input.*\n\n👉 Send *menu* to go to Main Menu.",
                 "❌ *অবৈধ ইনপুট।*\n\n👉 *menu* পাঠান।",
                 "❌ *अमान्य इनपुट।*\n\n👉 *menu* भेजें।");
-
-        private string BuildCartAddedMessage(UaeSession s, UaeCartItem item)
-        {
-            var total = s.Cart.Sum(c => c.Amount);
-            var cartLines = s.Cart.Count == 1
-                ? ""
-                : "\n" + string.Join("\n", s.Cart.Select((c, i) =>
-                    $"{i + 1}. {c.Name} x{c.Qty} = {c.Amount:F3} SAR"));
-
-            return s.T(
-                $"✅ *Added to Cart*\n\n{item.Name} x{item.Qty} = {item.Amount:F3} SAR" +
-                $"{cartLines}\n\n💰 *Total: {total:F3} SAR*\n\n" +
-                "1  Add More Products\nC  View Full Cart\nX  Checkout & Place Order\n0  Back to Categories\nS  Connect to Support Agent",
-
-                $"✅ *কার্টে যোগ হয়েছে*\n\n{item.Name} x{item.Qty} = {item.Amount:F3} SAR" +
-                $"{cartLines}\n\n💰 *মোট: {total:F3} SAR*\n\n" +
-                "1  আরও পণ্য\nC  কার্ট দেখুন\nX  চেকআউট\n0  ক্যাটাগরিতে ফিরুন\nS  এজেন্টের সাথে যোগাযোগ",
-
-                $"✅ *कार्ट में जोड़ा*\n\n{item.Name} x{item.Qty} = {item.Amount:F3} SAR" +
-                $"{cartLines}\n\n💰 *कुल: {total:F3} SAR*\n\n" +
-                "1  और उत्पाद\nC  कार्ट देखें\nX  चेकआउट\n0  श्रेणी में वापस\nS  एजेंट से जुड़ें");
-        }
-
-        private string BuildCartView(UaeSession s)
-        {
-            Transition(s, "AWAITING_CART_VIEW");
-
-            if (!s.Cart.Any())
-                return s.T("🛒 Your cart is empty.\n\n1  Start Shopping",
-                           "🛒 কার্ট খালি।\n\n1  শপিং শুরু করুন",
-                           "🛒 कार्ट खाली।\n\n1  शॉपिंग शुरू करें");
-
-            var total = s.Cart.Sum(c => c.Amount);
-            var lines = s.Cart.Select((c, i) =>
-                $"{i + 1}. {c.Name} x{c.Qty} = {c.Amount:F3} SAR  _(remove:{i + 1})_");
-
-            return s.T(
-                $"🛒 *Your Cart*\n\n{string.Join("\n", lines)}\n\n💰 *Total: {total:F3} SAR*\n\n" +
-                "X  Checkout & Place Order\n1  Add More Products\nC  Clear Cart\n0  Back\nS  Connect to Support Agent",
-
-                $"🛒 *আপনার কার্ট*\n\n{string.Join("\n", lines)}\n\n💰 *মোট: {total:F3} SAR*\n\n" +
-                "X  চেকআউট\n1  আরও পণ্য\nC  কার্ট খালি করুন\n0  ফিরুন\nS  এজেন্টের সাথে যোগাযোগ",
-
-                $"🛒 *आपका कार्ट*\n\n{string.Join("\n", lines)}\n\n💰 *कुल: {total:F3} SAR*\n\n" +
-                "X  चेकआउट\n1  और उत्पाद\nC  कार्ट साफ़ करें\n0  वापस\nS  एजेंट से जुड़ें");
-        }
-
-        private static string BuildNumberedList(
-            string title, List<string> items, string backOption,
-            List<UaeCartItem> cart)
-        {
-            var sb = new System.Text.StringBuilder();
-            sb.AppendLine(title);
-
-            if (cart.Any())
-            {
-                sb.AppendLine($"\n🛒 Cart: {cart.Count} item(s) | {cart.Sum(c => c.Amount):F3} SAR");
-            }
-
-            sb.AppendLine();
-            for (int i = 0; i < items.Count; i++)
-                sb.AppendLine($"{i + 1}  {items[i]}");
-
-            sb.AppendLine();
-            sb.AppendLine(backOption);
-            sb.AppendLine("S  Connect to Support Agent");
-            return sb.ToString().TrimEnd();
-        }
 
         private static string MimeToExt(string mime, string fallback) => mime switch
         {

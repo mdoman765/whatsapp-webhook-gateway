@@ -16,8 +16,8 @@ builder.Services.AddDbContextPool<AppDbContext>(options =>
     poolSize: 128);
 
 // ── Repositories (only what UAE bot needs) ────────────────────────────────────
-builder.Services.AddScoped<IWhatsAppSessionRepository,  WhatsAppSessionRepository>();
-builder.Services.AddScoped<IWhatsAppMessageRepository,  WhatsAppMessageRepository>();
+builder.Services.AddScoped<IWhatsAppSessionRepository, WhatsAppSessionRepository>();
+builder.Services.AddScoped<IWhatsAppMessageRepository, WhatsAppMessageRepository>();
 
 // ── Session service ───────────────────────────────────────────────────────────
 builder.Services.AddScoped<IWhatsAppSessionService, WhatsAppSessionService>();
@@ -25,10 +25,9 @@ builder.Services.AddScoped<IWhatsAppSessionService, WhatsAppSessionService>();
 // ── UAE Bot services ──────────────────────────────────────────────────────────
 builder.Services.AddSingleton<BotStateService>();   // per-user locks + burst detection
 builder.Services.AddSingleton<WebhookQueue>();       // Channel for instant 200 OK
-builder.Services.AddScoped<IUaeBotService,  UaeBotService>();
-builder.Services.AddScoped<IDialogClient,   DialogClient>();
-builder.Services.AddScoped<ISprorClient,    SprorClient>();
-builder.Services.AddScoped<IUaeCrmService,  UaeCrmService>();
+builder.Services.AddScoped<IUaeBotService, UaeBotService>();
+builder.Services.AddScoped<IDialogClient, DialogClient>();
+builder.Services.AddScoped<IUaeCrmService, UaeCrmService>();
 
 // ── Background services ───────────────────────────────────────────────────────
 builder.Services.AddHostedService<WebhookProcessorService>();
@@ -52,12 +51,6 @@ builder.Services.AddHttpClient("CrmClient", client =>
     if (!string.IsNullOrWhiteSpace(key))
         client.DefaultRequestHeaders.Add("access-token", key);
     client.Timeout = TimeSpan.FromSeconds(60);
-});
-
-// Spror (products / orders)
-builder.Services.AddHttpClient("Spror", client =>
-{
-    client.Timeout = TimeSpan.FromSeconds(30);
 });
 
 // ── Form limits ───────────────────────────────────────────────────────────────

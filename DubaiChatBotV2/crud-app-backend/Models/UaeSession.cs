@@ -3,23 +3,10 @@ using System.Text.Json.Serialization;
 
 namespace crud_app_backend.Bot.Models
 {
-    // ── Cart item stored in session ───────────────────────────────────────────
-    public class UaeCartItem
-    {
-        public string Pid { get; set; } = "";
-        public string Name { get; set; } = "";
-        public double Price { get; set; }
-        public int Qty { get; set; }
-        public string ProductCode { get; set; } = "";
-        public string ImageUrl { get; set; } = "";
-        public double OldPrice { get; set; }
-        public int Factor { get; set; } = 1;
-        public string GroupId { get; set; } = "";  // from product API — used in order
-        public string PriceId { get; set; } = "";  // from product API — used in order
-        public double Amount => Math.Round(Price * Qty, 3);
-    }
-
-    // ── Full session state for one UAE bot user ───────────────────────────────
+    /// <summary>
+    /// Full session state for one UAE bot user.
+    /// Serialised to JSON and stored in dbo.WhatsAppSessions.TempData.
+    /// </summary>
     public class UaeSession
     {
         public string Phone { get; set; } = string.Empty;
@@ -30,34 +17,13 @@ namespace crud_app_backend.Bot.Models
         // Shop authentication
         public bool ShopVerified { get; set; }
         public string? ShopCode { get; set; }
-        public string? ShopUserId { get; set; }
+        public string? ShopUserId { get; set; }   // id from shopDetails API
         public string? ShopName { get; set; }
-        public string? ShopCountryId { get; set; }
-        public string? ShopGroupId { get; set; }
-        public string? ShopPriceId { get; set; }
-
-        // Order flow — menu number → command mapping
-        public Dictionary<string, string> MenuMap { get; set; } = new();
-
-        // Order flow — browsing context
-        public string? SelectedCatId { get; set; }
-        public string? SelectedCatName { get; set; }
-        public string? SelectedSubcatId { get; set; }
-        public string? SelectedSubcatName { get; set; }
-        public string? PendingCartPid { get; set; }
-        public string? PendingCartName { get; set; }
-        public double PendingCartPrice { get; set; }
-
-        // Cart
-        public List<UaeCartItem> Cart { get; set; } = new();
 
         // Complaint / Return media
         public string MediaDescription { get; set; } = string.Empty;
         public List<string> MediaImages { get; set; } = new();
         public List<string> MediaVoices { get; set; } = new();
-
-        // Agent confirm — tracks which step of double-confirm we're on
-        public int AgentConfirmStep { get; set; } = 0;
 
         // ── Language helper ───────────────────────────────────────────────────
         public string T(string en, string bn, string hi)
@@ -93,41 +59,10 @@ namespace crud_app_backend.Bot.Models
                 s.ShopCode = Str(root, "shopCode");
                 s.ShopUserId = Str(root, "shopUserId");
                 s.ShopName = Str(root, "shopName");
-                s.ShopCountryId = Str(root, "shopCountryId");
-                s.ShopGroupId = Str(root, "shopGroupId");
-                s.ShopPriceId = Str(root, "shopPriceId");
-
-                // MenuMap
-                if (root.TryGetProperty("menuMap", out var mm) &&
-                    mm.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var prop in mm.EnumerateObject())
-                        s.MenuMap[prop.Name] = prop.Value.GetString() ?? "";
-                }
-
-                s.SelectedCatId = Str(root, "selectedCatId");
-                s.SelectedCatName = Str(root, "selectedCatName");
-                s.SelectedSubcatId = Str(root, "selectedSubcatId");
-                s.SelectedSubcatName = Str(root, "selectedSubcatName");
-                s.PendingCartPid = Str(root, "pendingCartPid");
-                s.PendingCartName = Str(root, "pendingCartName");
-
-                if (root.TryGetProperty("pendingCartPrice", out var pcp))
-                    s.PendingCartPrice = pcp.GetDouble();
-
-                // Cart
-                if (root.TryGetProperty("cart", out var cartEl) &&
-                    cartEl.ValueKind == JsonValueKind.Array)
-                {
-                    s.Cart = JsonSerializer.Deserialize<List<UaeCartItem>>(
-                        cartEl.GetRawText(), WriteOpts) ?? new();
-                }
 
                 s.MediaDescription = Str(root, "mediaDescription") ?? string.Empty;
                 s.MediaImages = StrList(root, "mediaImages") ?? new();
                 s.MediaVoices = StrList(root, "mediaVoices") ?? new();
-                s.AgentConfirmStep = root.TryGetProperty("agentConfirmStep", out var acs)
-                    ? acs.GetInt32() : 0;
             }
             catch { s = new UaeSession { Phone = phone }; }
 
@@ -151,7 +86,7 @@ namespace crud_app_backend.Bot.Models
                 return null;
             var list = new List<string>();
             foreach (var item in v.EnumerateArray())
-                if (item.GetString() is { } s) list.Add(s);
+                if (item.GetString() is { } str) list.Add(str);
             return list;
         }
     }

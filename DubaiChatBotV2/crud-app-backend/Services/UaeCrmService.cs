@@ -1,11 +1,19 @@
+using System.Net.Http.Headers;
 using System.Text.Json;
 
 namespace crud_app_backend.Bot.Services
 {
     /// <summary>
-    /// Submits complaints, returns and agent requests to:
+    /// Submits UAE chatbot tickets to CRM via multipart/form-data.
+    /// Sends actual file BYTES (not URLs) — same approach as old WhatsAppComplaintService.
+    ///
     /// POST crm.prangroup.com/api/whats-app/sales-support/v1/create-uae-ticket
-    /// ApiKey: uH6rJ3QpW9xN2Tz5K8bL (access-token header)
+    /// Fields:
+    ///   shopCode, whatsappNumber, description, location, cartItems
+    ///   ticket_category = "UAE_Chatbot"
+    ///   ticket_type     = "COMPLAIN" | "PRODUCT_REPLACEMENT" | "CONNECT_TO_AGENT"
+    ///   voice_file[]    = binary audio files
+    ///   images[]        = binary image files
     /// </summary>
     public class UaeCrmService : IUaeCrmService
     {
@@ -26,7 +34,6 @@ namespace crud_app_backend.Bot.Services
         public async Task<UaeCrmResult> SubmitAsync(
             UaeCrmRequest req, CancellationToken ct = default)
         {
-            // NEW endpoint for UAE chatbot tickets
             var url = _config["Crm:UaeSubmitUrl"]
                    ?? "https://crm.prangroup.com/api/whats-app/sales-support/v1/create-uae-ticket";
 
@@ -35,28 +42,60 @@ namespace crud_app_backend.Bot.Services
 
             try
             {
-                // Required fields for this endpoint
-                var body = new
-                {
-                    shopCode = req.ShopCode,
-                    whatsappNumber = req.WhatsappNumber,
-                    voiceFiles = req.VoiceFiles,
-                    images = req.Images,
-                    description = req.Description,
-                    location = req.Location,
-                    ticket_category = "UAE_Chatbot",   // required by this endpoint
-                    cartItems = req.CartItems,
-                    ticket_type = req.TicketType,   // API requires snake_case
-                };
+                using var form = new MultipartFormDataContent();
 
-                _logger.LogInformation("[UaeCRM] POST {Url} ticketType={T} shop={S}",
-                    url, req.TicketType, req.ShopCode);
+                // ── Text fields ───────────────────────────────────────────────
+                void Text(string key, string? val)
+                    => form.Add(new StringContent(val ?? string.Empty), key);
+
+                Text("shopCode", req.ShopCode);
+                Text("whatsappNumber", req.WhatsappNumber);
+                Text("description", req.Description ?? "");
+                Text("location", req.Location);
+                Text("cartItems", req.CartItems);
+                Text("ticket_category", "UAE_Chatbot");
+                Text("ticket_type", req.TicketType);
+
+                // ── Voice files → voice_file[] (actual binary bytes) ──────────
+                var voiceCount = 0;
+                foreach (var filePath in req.VoiceFiles)
+                {
+                    if (string.IsNullOrWhiteSpace(filePath)) continue;
+                    var fileBytes = ReadFile(filePath);
+                    if (fileBytes == null) continue;
+
+                    var mime = PathToMime(filePath, "audio/ogg");
+                    var content = new ByteArrayContent(fileBytes);
+                    content.Headers.ContentType = new MediaTypeHeaderValue(mime);
+                    form.Add(content, "voice_file[]", Path.GetFileName(filePath));
+                    voiceCount++;
+                    _logger.LogInformation("[UaeCRM] Voice attached: {F} ({B} bytes)", filePath, fileBytes.Length);
+                }
+
+                // ── Image files → images[] (actual binary bytes) ─────────────
+                var imageCount = 0;
+                foreach (var filePath in req.Images)
+                {
+                    if (string.IsNullOrWhiteSpace(filePath)) continue;
+                    var fileBytes = ReadFile(filePath);
+                    if (fileBytes == null) continue;
+
+                    var mime = PathToMime(filePath, "image/jpeg");
+                    var content = new ByteArrayContent(fileBytes);
+                    content.Headers.ContentType = new MediaTypeHeaderValue(mime);
+                    form.Add(content, "images[]", Path.GetFileName(filePath));
+                    imageCount++;
+                    _logger.LogInformation("[UaeCRM] Image attached: {F} ({B} bytes)", filePath, fileBytes.Length);
+                }
+
+                _logger.LogInformation(
+                    "[UaeCRM] POST {Url} ticketType={T} shop={S} voices={V} images={I}",
+                    url, req.TicketType, req.ShopCode, voiceCount, imageCount);
 
                 var client = _factory.CreateClient("CrmClient");
-                var resp = await client.PostAsJsonAsync(url, body, cts.Token);
+                var resp = await client.PostAsync(url, form, cts.Token);
                 var json = await resp.Content.ReadAsStringAsync(cts.Token);
 
-                // Log full response for debugging
                 _logger.LogInformation("[UaeCRM] {Code} response: {Body}",
                     (int)resp.StatusCode,
                     json.Length > 500 ? json[..500] : json);
@@ -64,12 +103,10 @@ namespace crud_app_backend.Bot.Services
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
 
-                // Check success: status == "success" string
-                // Response: {"status":"success","message":"...","data":{"id":101,...}}
-                var statusVal = root.TryGetProperty("status", out var sv)
-                    ? sv.GetString() : null;
+                // status == "success"
+                var statusVal = root.TryGetProperty("status", out var sv) ? sv.GetString() : null;
                 var isSuccess = statusVal?.ToLower() is "success" or "true" or "1"
-                    || resp.IsSuccessStatusCode;
+                             || resp.IsSuccessStatusCode;
 
                 if (!isSuccess)
                 {
@@ -80,7 +117,6 @@ namespace crud_app_backend.Bot.Services
                 }
 
                 // Extract ticket ID from data.id
-                // data is an object: {"id": 101, "shop_code": "...", ...}
                 string? ticketId = null;
                 if (root.TryGetProperty("data", out var da) &&
                     da.ValueKind == JsonValueKind.Object &&
@@ -105,5 +141,40 @@ namespace crud_app_backend.Bot.Services
                 return new UaeCrmResult(false, null, "Could not reach support system.");
             }
         }
+
+        // ── Read file bytes from disk ─────────────────────────────────────────
+        private byte[]? ReadFile(string filePath)
+        {
+            try
+            {
+                if (!File.Exists(filePath))
+                {
+                    _logger.LogWarning("[UaeCRM] File not found: {P}", filePath);
+                    return null;
+                }
+                return File.ReadAllBytes(filePath);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "[UaeCRM] ReadFile failed: {P}", filePath);
+                return null;
+            }
+        }
+
+        // ── Mime type from file extension ─────────────────────────────────────
+        private static string PathToMime(string path, string fallback)
+            => Path.GetExtension(path).ToLowerInvariant() switch
+            {
+                ".ogg" => "audio/ogg",
+                ".mp3" => "audio/mpeg",
+                ".m4a" => "audio/mp4",
+                ".wav" => "audio/wav",
+                ".opus" => "audio/opus",
+                ".jpg" or ".jpeg" => "image/jpeg",
+                ".png" => "image/png",
+                ".webp" => "image/webp",
+                ".gif" => "image/gif",
+                _ => fallback,
+            };
     }
 }

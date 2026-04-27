@@ -17,9 +17,6 @@ namespace crud_app_backend.Models
         [MaxLength(50)]
         public string PreviousStep { get; set; } = "INIT";
 
-        public bool PendingReport { get; set; } = false;
-        public bool PendingShopReg { get; set; } = false;
-
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;
         public ICollection<WhatsAppSessionHistory> History { get; set; }

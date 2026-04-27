@@ -40,8 +40,6 @@ namespace crud_app_backend.Services
                     CurrentStep = "INIT",
                     PreviousStep = "INIT",
                     TempData = "{}",
-                    PendingReport = false,
-                    PendingShopReg = false,
                     UpdatedAt = DateTime.UtcNow,
                     IsNew = true
                 };
@@ -74,8 +72,6 @@ namespace crud_app_backend.Services
                 TempData = string.IsNullOrWhiteSpace(req.TempData)
                                     ? "{}"
                                     : req.TempData,
-                PendingReport = req.PendingReport,
-                PendingShopReg = req.PendingShopReg,
                 // CreatedAt / UpdatedAt are set inside the repository
             };
 
@@ -167,8 +163,6 @@ namespace crud_app_backend.Services
                 CurrentStep = s.CurrentStep,
                 PreviousStep = s.PreviousStep,
                 TempData = s.TempData,
-                PendingReport = s.PendingReport,
-                PendingShopReg = s.PendingShopReg,
                 UpdatedAt = s.UpdatedAt,
                 IsNew = isNew
             };

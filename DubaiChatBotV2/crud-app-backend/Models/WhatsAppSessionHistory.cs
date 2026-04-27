@@ -15,18 +15,15 @@ namespace crud_app_backend.Models
         [Column("Phone")]
         public string Phone { get; set; } = default!;
 
-        [Required]
         [MaxLength(50)]
         [Column("FromStep")]
-        public string FromStep { get; set; } = default!;
+        public string? FromStep { get; set; }       // nullable — matches SQL NULL
 
-        [Required]
         [MaxLength(50)]
         [Column("ToStep")]
-        public string ToStep { get; set; } = default!;
+        public string? ToStep { get; set; }         // nullable — matches SQL NULL
 
-        [MaxLength(1000)]
-        [Column("RawMessage")]
+        [Column("RawMessage", TypeName = "nvarchar(max)")]
         public string? RawMessage { get; set; }
 
         [Column("TempDataSnapshot", TypeName = "nvarchar(max)")]
@@ -34,9 +31,5 @@ namespace crud_app_backend.Models
 
         [Column("CreatedAt")]
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
-
-        // Foreign key
-        [ForeignKey(nameof(Phone))]
-        public WhatsAppSession Session { get; set; } = default!;
     }
 }

@@ -9,7 +9,7 @@ namespace crud_app_backend.Bot.Services
         /// <summary>
         /// Send an image message with a caption via 360dialog v2.
         /// imageUrl must be a publicly accessible HTTPS URL.
-        /// e.g. https://chatbot.prangroup.com/images/pran-rfl-logo.jpg
+        /// e.g. https://webhook.prangroup.com/images/pran-rfl-logo.jpg
         /// 360dialog fetches the image directly from this URL — no upload needed.
         /// caption supports WhatsApp markdown (*bold*, _italic_, etc).
         /// Falls back to plain text automatically if imageUrl is empty or fetch fails.

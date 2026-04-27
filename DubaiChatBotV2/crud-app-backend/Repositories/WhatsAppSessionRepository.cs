@@ -18,12 +18,36 @@ namespace crud_app_backend.Repositories
 
         // ── GET ──────────────────────────────────────────────────────────
 
+        //public async Task<WhatsAppSession?> GetByPhoneAsync(
+        //    string phone, CancellationToken ct = default)
+        //{
+        //    return await _db.WhatsAppSessions
+        //        .AsNoTracking()
+        //        .FirstOrDefaultAsync(s => s.Phone == phone, ct);
+        //}
         public async Task<WhatsAppSession?> GetByPhoneAsync(
-            string phone, CancellationToken ct = default)
+    string phone, CancellationToken ct = default)
         {
-            return await _db.WhatsAppSessions
-                .AsNoTracking()
-                .FirstOrDefaultAsync(s => s.Phone == phone, ct);
+            try
+            {
+                return await _db.WhatsAppSessions
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(s => s.Phone == phone, ct);
+            }
+            catch (OperationCanceledException)
+            {
+                // Request was cancelled — rethrow to respect cancellation
+                throw;
+            }
+            catch (Exception ex)
+            {
+                // Log the exception (replace with your logger)
+                Console.WriteLine($"Error in GetByPhoneAsync: {ex.Message}");
+
+                // Optionally: return null or rethrow based on your design
+                return null;
+                // throw; // <- use this instead if you want upstream handling
+            }
         }
 
         // ── UPSERT ───────────────────────────────────────────────────────
@@ -79,8 +103,6 @@ namespace crud_app_backend.Repositories
                         existing.CurrentStep = session.CurrentStep;
                         existing.PreviousStep = session.PreviousStep;
                         existing.TempData = session.TempData;
-                        existing.PendingReport = session.PendingReport;
-                        existing.PendingShopReg = session.PendingShopReg;
                         existing.UpdatedAt = DateTime.UtcNow;
                         // CreatedAt never changes
 
