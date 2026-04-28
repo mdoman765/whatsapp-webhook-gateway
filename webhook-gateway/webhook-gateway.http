@@ -1,0 +1,6 @@
+@webhook_gateway_HostAddress = http://localhost:5151
+
+GET {{webhook_gateway_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

@@ -92,7 +92,8 @@ namespace crud_app_backend.Bot.Services
 
 
 
-        private static string? GetAckMessage(UaeSession s, UaeIncomingMessage msg)
+        // Non-static — needs _state.LastImageTime for ACK burst suppression
+        private string? GetAckMessage(UaeSession s, UaeIncomingMessage msg)
         {
             if (s.State == "AWAITING_SHOP_CODE" && msg.MsgType == "text")
                 return s.T("🔍 Verifying shop...", "🔍 শপ যাচাই করা হচ্ছে...", "🔍 दुकान की जाँच हो रही है...");
@@ -105,10 +106,27 @@ namespace crud_app_backend.Bot.Services
                 && msg.RawText != "0" && !string.IsNullOrEmpty(msg.RawText))
                 return s.T("⏳ Loading products...", "⏳ পণ্য লোড হচ্ছে...", "⏳ उत्पाद लोड हो रहे हैं...");
 
+            // ── Gallery burst suppression for ACK ──────────────────────────────
+            // WhatsApp fires one webhook per image when user sends from gallery.
+            // SemaphoreSlim ensures sequential processing per user.
+            // "ack:{phone}" key — only ONE "⏳ Uploading media..." per batch (5s window).
             if ((s.State == "AWAITING_RETURN_DETAILS" || s.State == "AWAITING_COMPLAINT_DETAILS"
                  || s.State == "AWAITING_RETURN_CONFIRM" || s.State == "AWAITING_COMPLAINT_CONFIRM")
                 && (msg.MsgType == "image" || msg.MsgType == "audio"))
+            {
+                // Use WA timestamp — not DateTime.UtcNow.
+                // By the time image 3 is processed, UtcNow may have drifted past the window.
+                // WA timestamps all gallery images within 1-2 seconds of each other.
+                var ackNow = msg.Timestamp > 0
+                    ? DateTimeOffset.FromUnixTimeSeconds(msg.Timestamp).UtcDateTime
+                    : DateTime.UtcNow;
+                var ackKey = $"ack:{s.Phone}";
+                if (_state.LastImageTime.TryGetValue(ackKey, out var lastAck)
+                    && Math.Abs((ackNow - lastAck).TotalSeconds) <= 5)
+                    return null; // suppress — ACK already sent for this batch
+                _state.LastImageTime[ackKey] = ackNow;
                 return s.T("⏳ Uploading media...", "⏳ মিডিয়া আপলোড হচ্ছে...", "⏳ मीडिया अपलोड हो रहा है...");
+            }
 
             if (s.State == "AWAITING_ORDER_CONFIRM" && msg.RawText == "y")
                 return s.T("⏳ Placing order...", "⏳ অর্ডার দেওয়া হচ্ছে...", "⏳ ऑर्डर दिया जा रहा है...");
@@ -176,7 +194,7 @@ namespace crud_app_backend.Bot.Services
                 "AWAITING_COMPLAINT_DETAILS" => await HandleMediaDetailsAsync(s, msg, "complaint"),
                 "AWAITING_COMPLAINT_CONFIRM" => await HandleComplaintConfirmAsync(s, msg),
                 "AWAITING_AGENT_CONFIRM_1" => await HandleAgentConfirm1Async(s, msg),
-                "AWAITING_AGENT_CONFIRM_2" => await HandleAgentConfirm1Async(s, msg), // fallback
+                "AWAITING_AGENT_CONFIRM_2" => await HandleAgentConfirm1Async(s, msg),
                 _ => BuildMainMenu(s),
             };
         }
@@ -226,7 +244,7 @@ namespace crud_app_backend.Bot.Services
                 "उदाहरण: *20100090*");
 
             await _dialog.SendImageAsync(msg.From, shopCodeImageUrl, caption);
-            return string.Empty; // image+caption already sent above
+            return string.Empty;
         }
 
         // ─────────────────────────────────────────────────────────────────────
@@ -270,7 +288,6 @@ namespace crud_app_backend.Bot.Services
                 var contName = _config["Spror:ContName"] ?? "Saudi Arabia";
                 var baseUrl = _config["Spror:BaseUrl"] ?? "https://spror.prgfms.com/api/v1";
 
-                // API requires POST with JSON body — NOT GET with query params
                 var client = _httpFactory.CreateClient();
                 client.Timeout = TimeSpan.FromSeconds(15);
                 client.DefaultRequestHeaders.TryAddWithoutValidation("Authorization", $"Bearer {token}");
@@ -287,7 +304,6 @@ namespace crud_app_backend.Bot.Services
                 using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
 
-                // Response: { "code": 200, "status": true, "data": [{...}] }
                 if (!root.TryGetProperty("status", out var st) || !st.GetBoolean())
                     return null;
 
@@ -296,7 +312,6 @@ namespace crud_app_backend.Bot.Services
                     dataEl.GetArrayLength() == 0) return null;
 
                 var shop = dataEl[0];
-                // id is a NUMBER in the response — use .ToString() to handle both
                 var id = shop.TryGetProperty("id", out var idEl) ? idEl.ToString() : "";
                 var siteName = shop.TryGetProperty("site_name", out var snEl) ? snEl.GetString() ?? "" : "";
 
@@ -359,7 +374,7 @@ namespace crud_app_backend.Bot.Services
         }
 
         // ─────────────────────────────────────────────────────────────────────
-        // FLOW 1 — PLACE ORDER (direct CRM ticket, no product browsing)
+        // FLOW 1 — PLACE ORDER
         // ─────────────────────────────────────────────────────────────────────
 
         private string StartPlaceOrder(UaeSession s)
@@ -406,17 +421,17 @@ namespace crud_app_backend.Bot.Services
                     "✅ *Order Request Submitted*\n\n" +
                     (result.TicketId != null ? $"Ticket ID : *{result.TicketId}*\n\n" : "") +
                     "Our sales team will contact you shortly to take your order.\n\n" +
-                    "👉 Send *menu* for Main Menu\n" ,
+                    "👉 Send *menu* for Main Menu\n",
 
                     "✅ *অর্ডার রিকোয়েস্ট জমা হয়েছে*\n\n" +
                     (result.TicketId != null ? $"টিকেট আইডি : *{result.TicketId}*\n\n" : "") +
                     "আমাদের সেলস টিম শীঘ্রই অর্ডার নিতে যোগাযোগ করবে।\n\n" +
-                    "👉 *menu* — মূল মেনু\n" ,
+                    "👉 *menu* — মূল মেনু\n",
 
                     "✅ *ऑर्डर अनुरोध जमा हुआ*\n\n" +
                     (result.TicketId != null ? $"टिकट ID : *{result.TicketId}*\n\n" : "") +
                     "हमारी सेल्स टीम जल्द आपसे संपर्क कर ऑर्डर लेगी।\n\n" +
-                    "👉 *menu* — मुख्य मेनू\n" )
+                    "👉 *menu* — मुख्य मेनू\n")
                 : s.T(
                     $"❌ Request failed.\n{result.Error}\n\nSend *Y* to retry or *menu* for main menu.",
                     $"❌ ব্যর্থ।\n{result.Error}\n\n*Y* পাঠিয়ে আবার চেষ্টা করুন।",
@@ -499,7 +514,6 @@ namespace crud_app_backend.Bot.Services
             var confirmState = flowType == "return"
                 ? "AWAITING_RETURN_CONFIRM"
                 : "AWAITING_COMPLAINT_CONFIRM";
-            var alreadyConfirm = s.State == confirmState;
 
             if (msg.MsgType == "text")
             {
@@ -522,21 +536,18 @@ namespace crud_app_backend.Bot.Services
                         "⚠️ ছবি আপলোড হয়নি। আবার পাঠান।",
                         "⚠️ फ़ोटो अपलोड नहीं हुई। पुनः भेजें।");
 
-                if (alreadyConfirm)
+                // ── Confirm message burst suppression ──────────────────────────
+                // "confirm:{phone}" key — separate from "ack:{phone}" in GetAckMessage.
+                // Ensures only ONE "✅ Received" is sent per gallery batch (5s window).
                 {
                     var now = msg.Timestamp > 0
                         ? DateTimeOffset.FromUnixTimeSeconds(msg.Timestamp).UtcDateTime
                         : DateTime.UtcNow;
-                    var isBurst = _state.LastImageTime.TryGetValue(s.Phone, out var last)
-                        && Math.Abs((now - last).TotalSeconds) <= 3;
-                    _state.LastImageTime[s.Phone] = now;
+                    var confirmKey = $"confirm:{s.Phone}";
+                    var isBurst = _state.LastImageTime.TryGetValue(confirmKey, out var last)
+                        && Math.Abs((now - last).TotalSeconds) <= 5;
+                    _state.LastImageTime[confirmKey] = now;
                     if (isBurst) return string.Empty;
-                }
-                else
-                {
-                    _state.LastImageTime[s.Phone] = msg.Timestamp > 0
-                        ? DateTimeOffset.FromUnixTimeSeconds(msg.Timestamp).UtcDateTime
-                        : DateTime.UtcNow;
                 }
             }
             else if (msg.MsgType == "audio")
@@ -558,7 +569,6 @@ namespace crud_app_backend.Bot.Services
             }
 
             Transition(s, confirmState);
-            if (alreadyConfirm && msg.MsgType == "image") return string.Empty;
 
             return s.T(
                 "✅ *Received.*\n\n" +
@@ -572,7 +582,7 @@ namespace crud_app_backend.Bot.Services
                 "আরও যোগ করতে *ছবি*, *ভয়েস* বা *টেক্সট* পাঠান",
 
                 "✅ *प्राप्त हुआ।*\n\n" +
-                "जमा करने के लिए *Y* भेजें\n" +
+                "जमা करने के लिए *Y* भेजें\n" +
                 "रद्द करने के लिए *N* भेजें\n\n" +
                 "अधिक जोड़ने के लिए *फ़ोटो*, *आवाज़* या *टेक्स्ट* भेजें");
         }
@@ -607,7 +617,7 @@ namespace crud_app_backend.Bot.Services
                 $"✅ *{ticketLabel} Submitted*\n\n" +
                 (result.TicketId != null ? $"Ticket ID : *{result.TicketId}*\n\n" : "") +
                 "Our team will contact you shortly.\n\n" +
-                "👉 Send *menu* for Main Menu\n" ,
+                "👉 Send *menu* for Main Menu\n",
 
                 $"✅ *{ticketLabel} জমা হয়েছে*\n\n" +
                 (result.TicketId != null ? $"টিকেট আইডি : *{result.TicketId}*\n\n" : "") +
@@ -666,7 +676,7 @@ namespace crud_app_backend.Bot.Services
             {
                 ShopCode = s.ShopCode ?? "",
                 WhatsappNumber = s.Phone,
-                TicketType = "connect_to_agent",
+                TicketType = "CONNECT_TO_AGENT",
                 Description = $"User requested live agent support. Shop: {s.ShopName ?? s.ShopCode}",
             };
 
@@ -723,37 +733,30 @@ namespace crud_app_backend.Bot.Services
             string from, string senderName, long timestamp,
             string subFolder, string? caption = null)
         {
-            // Guard: empty mediaId means WhatsApp didn't send a media ID
             if (string.IsNullOrWhiteSpace(mediaId))
             {
                 _logger.LogWarning("[UAE] SaveMedia skipped — empty mediaId msgId={Id}", messageId);
                 return null;
             }
-
-            // Guard: WebRootPath must be set
             if (string.IsNullOrWhiteSpace(_env.WebRootPath))
             {
                 _logger.LogError("[UAE] SaveMedia failed — WebRootPath is null or empty");
                 return null;
             }
-
             try
             {
-                // Step 1: Download from 360dialog
                 _logger.LogInformation("[UAE] Downloading media mediaId={Id} type={T}", mediaId, subFolder);
                 var (bytes, mime) = await _dialog.DownloadMediaAsync(mediaId, mimeType);
                 _logger.LogInformation("[UAE] Downloaded {B} bytes mime={M}", bytes.Length, mime);
 
-                // Step 2: Save to disk
                 var ext = MimeToExt(mime, subFolder == "audio" ? ".ogg" : ".jpg");
                 var fileName = $"{messageId}{ext}";
                 var folder = Path.Combine(_env.WebRootPath, "wa-media", subFolder);
                 Directory.CreateDirectory(folder);
                 var filePath = Path.Combine(folder, fileName);
                 await File.WriteAllBytesAsync(filePath, bytes);
-                _logger.LogInformation("[UAE] Saved media to {Path}", filePath);
+                _logger.LogInformation("[UAE] Saved to {Path}", filePath);
 
-                // Step 3: Record in DB (non-critical — failure here should NOT fail the upload)
                 var baseUrl = _config["App:BaseUrl"] ?? "https://webhook.prangroup.com";
                 var fileUrl = $"{baseUrl}/wa-media/{subFolder}/{fileName}";
                 try
@@ -781,7 +784,6 @@ namespace crud_app_backend.Bot.Services
                 }
                 catch (Exception dbEx)
                 {
-                    // DB insert failed but file IS on disk — log and continue
                     _logger.LogWarning(dbEx, "[UAE] Media DB insert failed (file saved OK): {Id}", messageId);
                 }
 
@@ -791,20 +793,19 @@ namespace crud_app_backend.Bot.Services
             catch (HttpRequestException httpEx)
             {
                 _logger.LogError(httpEx,
-                    "[UAE] SaveMedia — 360dialog download failed mediaId={Id}: {Msg}",
-                    mediaId, httpEx.Message);
+                    "[UAE] 360dialog download failed mediaId={Id}: {Msg}", mediaId, httpEx.Message);
                 return null;
             }
             catch (IOException ioEx)
             {
                 _logger.LogError(ioEx,
-                    "[UAE] SaveMedia — disk write failed folder=wa-media/{Sub}: {Msg}",
-                    subFolder, ioEx.Message);
+                    "[UAE] Disk write failed wa-media/{Sub}: {Msg}", subFolder, ioEx.Message);
                 return null;
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "[UAE] SaveMedia failed msgId={Id} mediaId={MId}", messageId, mediaId);
+                _logger.LogError(ex,
+                    "[UAE] SaveMedia failed msgId={Id} mediaId={MId}", messageId, mediaId);
                 return null;
             }
         }
