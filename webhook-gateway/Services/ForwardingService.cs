@@ -14,6 +14,7 @@ namespace webhook_gateway.Services
     public class ForwardingService
     {
         public const string UaeChatbotClient   = "UaeChatbotClient";
+        public const string MalaysiaChatbotClient = "MalaysiaChatbotClient";
         public const string SalesSupportClient = "SalesSupportClient";
 
         private readonly IHttpClientFactory _httpClientFactory;
@@ -38,6 +39,14 @@ namespace webhook_gateway.Services
                        ?? "/webhook/whatsapp-webhook";
 
             return ForwardAsync(UaeChatbotClient, request, path, ct);
+        }
+        public Task<ForwardResult> ForwardToMalaysiaAsync(
+           HttpRequest request, CancellationToken ct = default)
+        {
+            var path = _configuration["Downstream:MalaysiaChatbot:WebhookPath"]
+                       ?? "/webhook/whatsapp-webhook";
+
+            return ForwardAsync(MalaysiaChatbotClient, request, path, ct);
         }
 
         // ── Sales Support Chatbot ────────────────────────────────────────────

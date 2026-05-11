@@ -26,6 +26,15 @@ builder.Services.AddHttpClient(ForwardingService.UaeChatbotClient, client =>
     client.Timeout = TimeSpan.FromSeconds(
         builder.Configuration.GetValue("Downstream:TimeoutSeconds", 30));
 });
+builder.Services.AddHttpClient(ForwardingService.MalaysiaChatbotClient, client =>
+{
+    client.BaseAddress = new Uri(
+        builder.Configuration["Downstream:MalaysiaChatbot:BaseUrl"] ?? "http://localhost:8043");
+
+    client.Timeout = TimeSpan.FromSeconds(
+        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 30));
+});
+
 
 builder.Services.AddHttpClient(ForwardingService.SalesSupportClient, client =>
 {
@@ -35,6 +44,7 @@ builder.Services.AddHttpClient(ForwardingService.SalesSupportClient, client =>
     client.Timeout = TimeSpan.FromSeconds(
         builder.Configuration.GetValue("Downstream:TimeoutSeconds", 30));
 });
+
 
 builder.Services.AddScoped<ForwardingService>();
 
