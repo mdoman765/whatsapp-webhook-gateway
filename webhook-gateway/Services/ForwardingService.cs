@@ -13,7 +13,7 @@ namespace webhook_gateway.Services
     /// </summary>
     public class ForwardingService
     {
-        public const string UaeChatbotClient   = "UaeChatbotClient";
+        public const string UaeChatbotClient = "UaeChatbotClient";
         public const string MalaysiaChatbotClient = "MalaysiaChatbotClient";
         public const string SalesSupportClient = "SalesSupportClient";
 
@@ -21,14 +21,21 @@ namespace webhook_gateway.Services
         private readonly IConfiguration _configuration;
         private readonly ILogger<ForwardingService> _logger;
 
+        // Deduplication cache — prevents double-processing when 360dialog
+        // retries a webhook (e.g. after a slow cold-start response).
+        // Key = message_id extracted from JSON body, Value = received time.
+        // Entries expire after 60 seconds — enough to catch any retry.
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, DateTime>
+            _seen = new();
+
         public ForwardingService(
             IHttpClientFactory httpClientFactory,
             IConfiguration configuration,
             ILogger<ForwardingService> logger)
         {
             _httpClientFactory = httpClientFactory;
-            _configuration     = configuration;
-            _logger            = logger;
+            _configuration = configuration;
+            _logger = logger;
         }
 
         // ── UAE Chatbot ──────────────────────────────────────────────────────
@@ -85,9 +92,9 @@ namespace webhook_gateway.Services
             // ── 3. Build outgoing request ─────────────────────────────────────
             var outgoing = new HttpRequestMessage
             {
-                Method     = new HttpMethod(incoming.Method),
+                Method = new HttpMethod(incoming.Method),
                 RequestUri = new Uri(fullDownstreamPath, UriKind.Relative),
-                Content    = new ByteArrayContent(bodyBytes)
+                Content = new ByteArrayContent(bodyBytes)
             };
 
             // Preserve content-type exactly (e.g. application/json; charset=utf-8)
@@ -106,6 +113,22 @@ namespace webhook_gateway.Services
                     outgoing.Headers.TryAddWithoutValidation(key, val.ToArray());
             }
 
+            // ── Dedup — prevents double reply when 360dialog retries ──────────────
+            var messageId = ExtractMessageId(bodyBytes);
+            if (!string.IsNullOrEmpty(messageId))
+            {
+                var now = DateTime.UtcNow;
+                foreach (var key in _seen.Keys.ToList())
+                    if (_seen.TryGetValue(key, out var t) && (now - t).TotalSeconds > 60)
+                        _seen.TryRemove(key, out _);
+                if (!_seen.TryAdd(messageId, now))
+                {
+                    _logger.LogWarning("[{Client}] Duplicate msgId={Id} — dropped",
+                        clientName, messageId);
+                    return new ForwardResult(200, "application/json", "{}");
+                }
+            }
+
             _logger.LogInformation(
                 "[{Client}] → {Method} {Path} ({Bytes} bytes)",
                 clientName, incoming.Method, fullDownstreamPath, bodyBytes.Length);
@@ -119,7 +142,7 @@ namespace webhook_gateway.Services
                     outgoing, HttpCompletionOption.ResponseContentRead, ct);
 
                 // Downstream chatbots always return JSON so reading as string is safe
-                var body        = await response.Content.ReadAsStringAsync(ct);
+                var body = await response.Content.ReadAsStringAsync(ct);
                 var contentType = response.Content.Headers.ContentType?.ToString()
                                   ?? "application/json";
 
@@ -140,6 +163,30 @@ namespace webhook_gateway.Services
                 return new ForwardResult(502, "application/json",
                     """{"error":"Bad gateway — could not reach downstream service."}""");
             }
+        }
+
+        // Extract WhatsApp message_id from JSON body for deduplication
+        private static string ExtractMessageId(byte[] body)
+        {
+            try
+            {
+                using var doc = System.Text.Json.JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                // Standard Cloud API: entry[0].changes[0].value.messages[0].id
+                if (root.TryGetProperty("entry", out var entries) &&
+                    entries.GetArrayLength() > 0)
+                {
+                    var value = entries[0]
+                        .GetProperty("changes")[0]
+                        .GetProperty("value");
+                    if (value.TryGetProperty("messages", out var msgs) &&
+                        msgs.GetArrayLength() > 0 &&
+                        msgs[0].TryGetProperty("id", out var idEl))
+                        return idEl.GetString() ?? "";
+                }
+            }
+            catch { }
+            return "";
         }
 
         // Headers sent by 360dialog that the downstream chatbots need to verify authenticity

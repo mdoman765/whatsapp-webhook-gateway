@@ -24,7 +24,7 @@ builder.Services.AddHttpClient(ForwardingService.UaeChatbotClient, client =>
         builder.Configuration["Downstream:UaeChatbot:BaseUrl"] ?? "http://localhost:8041");
 
     client.Timeout = TimeSpan.FromSeconds(
-        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 30));
+        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 55));  // must be > 360dialog retry timeout (~20s)
 });
 builder.Services.AddHttpClient(ForwardingService.MalaysiaChatbotClient, client =>
 {
@@ -32,7 +32,7 @@ builder.Services.AddHttpClient(ForwardingService.MalaysiaChatbotClient, client =
         builder.Configuration["Downstream:MalaysiaChatbot:BaseUrl"] ?? "http://localhost:8043");
 
     client.Timeout = TimeSpan.FromSeconds(
-        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 30));
+        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 55));  // must be > 360dialog retry timeout (~20s)
 });
 
 
@@ -42,22 +42,25 @@ builder.Services.AddHttpClient(ForwardingService.SalesSupportClient, client =>
         builder.Configuration["Downstream:SalesSupport:BaseUrl"] ?? "http://localhost:8042");
 
     client.Timeout = TimeSpan.FromSeconds(
-        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 30));
+        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 55));  // must be > 360dialog retry timeout (~20s)
 });
 
 
-builder.Services.AddScoped<ForwardingService>();
+// Singleton — shares dedup cache across all requests
+builder.Services.AddSingleton<ForwardingService>();
 
 var app = builder.Build();
 
 // ── Middleware pipeline ───────────────────────────────────────────────────────
 
 
-    app.UseSwagger();
-    app.UseSwaggerUI();
+app.UseSwagger();
+app.UseSwaggerUI();
 
 
-app.UseHttpsRedirection();
+// REMOVED app.UseHttpsRedirection()
+// Gateway runs behind IIS which handles HTTPS termination.
+// UseHttpsRedirection causes 301 redirects → 360dialog POSTs twice → double bot reply.
 app.UseStaticFiles();
 app.MapControllers();
 
