@@ -16,6 +16,7 @@ namespace webhook_gateway.Services
         public const string UaeChatbotClient = "UaeChatbotClient";
         public const string MalaysiaChatbotClient = "MalaysiaChatbotClient";
         public const string SalesSupportClient = "SalesSupportClient";
+        public const string CrmCallbackClient = "CrmCallbackClient";
 
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
@@ -64,6 +65,16 @@ namespace webhook_gateway.Services
                        ?? "/webhook/whatsapp-webhook";
 
             return ForwardAsync(SalesSupportClient, request, path, ct);
+        }
+
+        // ── CRM Status Callback ──────────────────────────────────────────────
+        public Task<ForwardResult> ForwardToCrmCallbackAsync(
+            HttpRequest request, CancellationToken ct = default)
+        {
+            var path = _configuration["Downstream:CrmCallback:WebhookPath"]
+                       ?? "/api/crm/ticket-status";
+
+            return ForwardAsync(CrmCallbackClient, request, path, ct);
         }
 
         // ── Internal proxy engine ────────────────────────────────────────────

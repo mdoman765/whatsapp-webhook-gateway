@@ -46,6 +46,16 @@ builder.Services.AddHttpClient(ForwardingService.SalesSupportClient, client =>
 });
 
 
+// CRM status-callback client — forwards to UAE Chatbot backend /api/crm/ticket-status
+builder.Services.AddHttpClient(ForwardingService.CrmCallbackClient, client =>
+{
+    client.BaseAddress = new Uri(
+        builder.Configuration["Downstream:CrmCallback:BaseUrl"] ?? "http://localhost:8041");
+
+    client.Timeout = TimeSpan.FromSeconds(
+        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 55));
+});
+
 // Singleton — shares dedup cache across all requests
 builder.Services.AddSingleton<ForwardingService>();
 
