@@ -47,6 +47,17 @@ builder.Services.AddHttpClient(ForwardingService.SalesSupportClient, client =>
 
 
 // CRM status-callback client — forwards to UAE Chatbot backend /api/crm/ticket-status
+builder.Services.AddHttpClient(ForwardingService.KsaChatbotClient, client =>
+{
+    client.BaseAddress = new Uri(
+        builder.Configuration["Downstream:KsaChatbot:BaseUrl"] ?? "http://localhost:8044");
+
+    client.Timeout = TimeSpan.FromSeconds(
+        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 55));  // must be > 360dialog retry timeout (~20s)
+});
+
+
+// CRM status-callback client — forwards to UAE Chatbot backend /api/crm/ticket-status
 builder.Services.AddHttpClient(ForwardingService.CrmCallbackClient, client =>
 {
     client.BaseAddress = new Uri(

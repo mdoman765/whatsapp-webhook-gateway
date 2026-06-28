@@ -17,6 +17,7 @@ namespace webhook_gateway.Services
         public const string MalaysiaChatbotClient = "MalaysiaChatbotClient";
         public const string SalesSupportClient = "SalesSupportClient";
         public const string CrmCallbackClient = "CrmCallbackClient";
+        public const string KsaChatbotClient = "KsaChatbotClient";
 
         private readonly IHttpClientFactory _httpClientFactory;
         private readonly IConfiguration _configuration;
@@ -65,6 +66,16 @@ namespace webhook_gateway.Services
                        ?? "/webhook/whatsapp-webhook";
 
             return ForwardAsync(SalesSupportClient, request, path, ct);
+        }
+
+        // ── KSA Chatbot ──────────────────────────────────────────────────────
+        public Task<ForwardResult> ForwardToKsaAsync(
+            HttpRequest request, CancellationToken ct = default)
+        {
+            var path = _configuration["Downstream:KsaChatbot:WebhookPath"]
+                       ?? "/webhook/whatsapp-webhook";
+
+            return ForwardAsync(KsaChatbotClient, request, path, ct);
         }
 
         // ── CRM Status Callback ──────────────────────────────────────────────
@@ -125,14 +136,18 @@ namespace webhook_gateway.Services
             }
 
             // ── Dedup — prevents double reply when 360dialog retries ──────────────
+            // Key is prefixed with clientName so each chatbot has its own independent
+            // dedup scope. Without this, a message ID seen by UAE would incorrectly
+            // suppress the same ID arriving for KSA/Malaysia, returning {} on 2nd message.
             var messageId = ExtractMessageId(bodyBytes);
             if (!string.IsNullOrEmpty(messageId))
             {
+                var dedupKey = $"{clientName}:{messageId}";
                 var now = DateTime.UtcNow;
                 foreach (var key in _seen.Keys.ToList())
                     if (_seen.TryGetValue(key, out var t) && (now - t).TotalSeconds > 60)
                         _seen.TryRemove(key, out _);
-                if (!_seen.TryAdd(messageId, now))
+                if (!_seen.TryAdd(dedupKey, now))
                 {
                     _logger.LogWarning("[{Client}] Duplicate msgId={Id} — dropped",
                         clientName, messageId);
