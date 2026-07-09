@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using webhook_gateway.Options;
 using webhook_gateway.Services;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -69,6 +70,22 @@ builder.Services.AddHttpClient(ForwardingService.CrmCallbackClient, client =>
 
 // Singleton — shares dedup cache across all requests
 builder.Services.AddSingleton<ForwardingService>();
+
+// ── CRM → Chatbot shop-assignment routing ───────────────────────────────────
+// Bind "ChatbotRouting" config section directly to a Dictionary<string, ChatbotRoute>.
+// Adding a new chatbot is just a new entry in appsettings.json — no code change.
+builder.Services.Configure<Dictionary<string, ChatbotRoute>>(
+    builder.Configuration.GetSection("ChatbotRouting"));
+
+// Single HttpClient for all CRM shop-assignment forwarding — target URL is
+// built dynamically per request from ChatbotRouting config.
+builder.Services.AddHttpClient(CrmRoutingService.HttpClientName, client =>
+{
+    client.Timeout = TimeSpan.FromSeconds(
+        builder.Configuration.GetValue("Downstream:TimeoutSeconds", 30));
+});
+
+builder.Services.AddScoped<ICrmRoutingService, CrmRoutingService>();
 
 var app = builder.Build();
 
