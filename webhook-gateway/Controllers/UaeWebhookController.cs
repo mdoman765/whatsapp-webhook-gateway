@@ -16,26 +16,41 @@ namespace webhook_gateway.Controllers
     {
         private readonly ForwardingService _forwarding;
         private readonly ILogger<UaeWebhookController> _logger;
+        private readonly IConfiguration _configuration;
 
         public UaeWebhookController(
             ForwardingService forwarding,
-            ILogger<UaeWebhookController> logger)
+            ILogger<UaeWebhookController> logger,
+            IConfiguration configuration)
         {
             _forwarding = forwarding;
-            _logger     = logger;
+            _logger = logger;
+            _configuration = configuration;
         }
 
         /// <summary>
         /// GET /webhook/whatsapp-webhook
-        /// 360dialog calls this to verify the webhook URL.
-        /// The verification challenge is forwarded to the UAE Chatbot (port 8041).
+        /// Meta/360dialog sends this request to verify the webhook endpoint.
+        /// Must respond with hub.challenge if the verify token matches.
         /// </summary>
         [HttpGet("whatsapp-webhook")]
-        public async Task<IActionResult> Verify(CancellationToken ct)
+        public IActionResult Verify(
+            [FromQuery(Name = "hub.mode")] string? mode,
+            [FromQuery(Name = "hub.verify_token")] string? verifyToken,
+            [FromQuery(Name = "hub.challenge")] string? challenge)
         {
-            _logger.LogInformation("[UAE] Webhook verification request received");
-            var result = await _forwarding.ForwardToUaeAsync(Request, ct);
-            return Content(result.Body, result.ContentType);
+            _logger.LogInformation("[UAE] Webhook verification request received. Mode={Mode}", mode);
+
+            var expectedToken = _configuration["WhatsApp:VerifyToken"];
+
+            if (mode == "subscribe" && verifyToken == expectedToken)
+            {
+                _logger.LogInformation("[UAE] Webhook verified successfully.");
+                return Content(challenge ?? string.Empty, "text/plain");
+            }
+
+            _logger.LogWarning("[UAE] Webhook verification failed. Token mismatch or wrong mode.");
+            return Forbid();
         }
 
         /// <summary>
